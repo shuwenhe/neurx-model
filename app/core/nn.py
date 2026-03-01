@@ -9,17 +9,27 @@ class Module:
 
     def parameters(self):
         params = []
+        seen = set()
+
+        def add_param(param):
+            pid = id(param)
+            if pid not in seen:
+                seen.add(pid)
+                params.append(param)
+
         for value in self.__dict__.values():
             if isinstance(value, Parameter):
-                params.append(value)
+                add_param(value)
             elif isinstance(value, Module):
-                params.extend(value.parameters())
+                for p in value.parameters():
+                    add_param(p)
             elif isinstance(value, (list, tuple)):
                 for item in value:
                     if isinstance(item, Parameter):
-                        params.append(item)
+                        add_param(item)
                     elif isinstance(item, Module):
-                        params.extend(item.parameters())
+                        for p in item.parameters():
+                            add_param(p)
         return params
 
     def zero_grad(self):
@@ -56,6 +66,7 @@ class Parameter(Tensor):
 
 class Embedding(Module):
     def __init__(self, num_embeddings, embedding_dim):
+        super().__init__()
         self.weight = Parameter(np.random.randn(num_embeddings, embedding_dim) * 0.02)
 
     def __call__(self, input_ids):
@@ -75,9 +86,10 @@ class Embedding(Module):
 
 class Linear(Module):
     def __init__(self, in_features, out_features, bias=True):
+        super().__init__()
         scale = (2.0 / max(1, in_features)) ** 0.5
         self.weight = Parameter(np.random.randn(in_features, out_features) * scale)
-        self.bias = Parameter(np.zeros((1, 1, out_features))) if bias else None
+        self.bias = Parameter(np.zeros((out_features,))) if bias else None
 
     def __call__(self, x):
         out = x @ self.weight
@@ -89,6 +101,7 @@ class Linear(Module):
 class LayerNorm(Module):
     """层归一化：对最后一个维度进行归一化"""
     def __init__(self, normalized_shape, eps=1e-5, bias=True):
+        super().__init__()
         if isinstance(normalized_shape, int):
             normalized_shape = (normalized_shape,)
         self.normalized_shape = normalized_shape
@@ -98,28 +111,32 @@ class LayerNorm(Module):
 
     def __call__(self, x):
         # x.shape = (..., normalized_shape)
-        mean = x.data.mean(axis=-1, keepdims=True)
-        var = x.data.var(axis=-1, keepdims=True)
+        norm_dims = len(self.normalized_shape)
+        norm_axes = tuple(range(x.data.ndim - norm_dims, x.data.ndim))
+        mean = x.data.mean(axis=norm_axes, keepdims=True)
+        var = x.data.var(axis=norm_axes, keepdims=True)
         x_normalized = (x.data - mean) / np.sqrt(var + self.eps)
         out_data = x_normalized * self.weight.data + (self.bias.data if self.bias else 0)
-        
-        requires_grad = x.requires_grad or self.weight.requires_grad or (self.bias and self.bias.requires_grad)
+
+        requires_grad = x.requires_grad or self.weight.requires_grad or (self.bias is not None and self.bias.requires_grad)
         children = [c for c in [x, self.weight, self.bias] if c is not None and getattr(c, 'requires_grad', False)]
         out = Tensor(out_data, requires_grad=requires_grad, _children=tuple(children), _op="layernorm")
 
         def _backward():
             if not out.grad.any():
                 return
-            # 简化的梯度计算
+            reduce_axes = tuple(range(out.grad.ndim - len(self.normalized_shape)))
             if self.weight.requires_grad:
-                self.weight.grad += (out.grad * x_normalized).sum(axis=tuple(range(out.grad.ndim - len(self.normalized_shape))))
+                self.weight.grad += (out.grad * x_normalized).sum(axis=reduce_axes)
             if self.bias and self.bias.requires_grad:
-                self.bias.grad += out.grad.sum(axis=tuple(range(out.grad.ndim - len(self.normalized_shape))))
+                self.bias.grad += out.grad.sum(axis=reduce_axes)
             if x.requires_grad:
-                # 简化版本：主要传播 weight 的梯度
                 dxhat = out.grad * self.weight.data
-                std = np.sqrt(var + self.eps)
-                x.grad += dxhat / std
+                inv_std = 1.0 / np.sqrt(var + self.eps)
+                n = float(np.prod(self.normalized_shape))
+                sum_dxhat = dxhat.sum(axis=norm_axes, keepdims=True)
+                sum_dxhat_xhat = (dxhat * x_normalized).sum(axis=norm_axes, keepdims=True)
+                x.grad += (inv_std / n) * (n * dxhat - sum_dxhat - x_normalized * sum_dxhat_xhat)
 
         out._backward = _backward
         return out
@@ -128,8 +145,10 @@ class LayerNorm(Module):
 class Dropout(Module):
     """Dropout正则化"""
     def __init__(self, p=0.5):
+        super().__init__()
+        if p < 0 or p >= 1:
+            raise ValueError(f"dropout p must satisfy 0 <= p < 1, got {p}")
         self.p = p
-        self.training = True
 
     def __call__(self, x):
         if not self.training or self.p == 0:
@@ -177,6 +196,7 @@ class GELU(Module):
 class ModuleList(Module):
     """存储Module列表"""
     def __init__(self, modules=None):
+        super().__init__()
         self._modules = []
         if modules:
             self._modules.extend(modules)
@@ -195,17 +215,27 @@ class ModuleList(Module):
 
     def parameters(self):
         params = []
+        seen = set()
+
+        def add_param(param):
+            pid = id(param)
+            if pid not in seen:
+                seen.add(pid)
+                params.append(param)
+
         for module in self._modules:
             if isinstance(module, Module):
-                params.extend(module.parameters())
+                for p in module.parameters():
+                    add_param(p)
             elif isinstance(module, Parameter):
-                params.append(module)
+                add_param(module)
         return params
 
 
 class ModuleDict(Module):
     """存储Module字典"""
     def __init__(self, modules=None):
+        super().__init__()
         self._modules = {}
         if modules:
             self._modules.update(modules)
@@ -230,17 +260,27 @@ class ModuleDict(Module):
 
     def parameters(self):
         params = []
+        seen = set()
+
+        def add_param(param):
+            pid = id(param)
+            if pid not in seen:
+                seen.add(pid)
+                params.append(param)
+
         for module in self._modules.values():
             if isinstance(module, Module):
-                params.extend(module.parameters())
+                for p in module.parameters():
+                    add_param(p)
             elif isinstance(module, Parameter):
-                params.append(module)
+                add_param(module)
         return params
 
 
 class MultiHeadAttention(Module):
     """多头自注意力机制（带因果遮罩）"""
     def __init__(self, n_embd, n_heads, dropout=0.1, max_seq_len=2048):
+        super().__init__()
         assert n_embd % n_heads == 0, "n_embd 必须能被 n_heads 整除"
         self.n_heads = n_heads
         self.n_embd = n_embd
@@ -257,6 +297,11 @@ class MultiHeadAttention(Module):
     
     def __call__(self, x):
         B, T, C = x.data.shape
+        if T > self.causal_mask.shape[0]:
+            raise ValueError(
+                f"sequence length {T} exceeds max_seq_len {self.causal_mask.shape[0]}; "
+                "increase max_seq_len when constructing MultiHeadAttention"
+            )
         
         # QKV 投影: (B, T, 3*C)
         qkv = self.qkv(x)
@@ -338,6 +383,7 @@ class MultiHeadAttention(Module):
 class MLP(Module):
     """前馈神经网络（Transformer 的 FFN）"""
     def __init__(self, n_embd, hidden_dim=None, dropout=0.1):
+        super().__init__()
         if hidden_dim is None:
             hidden_dim = 4 * n_embd
         self.fc1 = Linear(n_embd, hidden_dim)
@@ -356,6 +402,7 @@ class MLP(Module):
 class TransformerBlock(Module):
     """Transformer 块：LayerNorm -> Attention -> Residual -> LayerNorm -> MLP -> Residual"""
     def __init__(self, n_embd, n_heads, dropout=0.1):
+        super().__init__()
         self.ln1 = LayerNorm(n_embd)
         self.attn = MultiHeadAttention(n_embd, n_heads, dropout)
         self.ln2 = LayerNorm(n_embd)

@@ -6,6 +6,7 @@ import pickle
 import numpy as np
 
 from app.core.models import TinyLM, TransformerLM
+from app.core.sampling import SamplingConfig, sample_next_token
 from app.core.tokenizer import CharTokenizer
 
 
@@ -88,10 +89,34 @@ def load_model(checkpoint_path):
                 f"checkpoint 参数形状不匹配: {key}, src={src.shape}, dst={p.data.shape}"
             )
         p.data[...] = src
+    model.eval()
     return model, tokenizer
 
 
-def generate_text(prompt, model, tokenizer, max_new_tokens=120, temperature=0.8):
+def generate_text(
+    prompt,
+    model,
+    tokenizer,
+    max_new_tokens=120,
+    temperature=0.8,
+    top_k=None,
+    top_p=1.0,
+    repetition_penalty=1.0,
+    seed=None,
+):
+    if hasattr(model, "eval"):
+        model.eval()
+
+    sampling_cfg = SamplingConfig(
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        repetition_penalty=repetition_penalty,
+        seed=seed,
+    )
+    sampling_cfg.validate()
+    rng = np.random.default_rng(seed)
+
     ids = tokenizer.encode(prompt)
     if not ids:
         ids = [0]
@@ -101,11 +126,12 @@ def generate_text(prompt, model, tokenizer, max_new_tokens=120, temperature=0.8)
         ctx = ids[-max_ctx:] if isinstance(max_ctx, int) and max_ctx > 0 else ids
         x = np.array([ctx], dtype=np.int64)
         logits, _ = model(x, None)
-        next_logits = logits.data[0, -1] / max(temperature, 1e-6)
-        next_logits = next_logits - np.max(next_logits)
-        probs = np.exp(next_logits)
-        probs = probs / (probs.sum() + 1e-12)
-        next_id = int(np.random.choice(len(probs), p=probs))
+        next_id = sample_next_token(
+            logits.data[0, -1],
+            token_ids=ids,
+            cfg=sampling_cfg,
+            rng=rng,
+        )
         ids.append(next_id)
 
     generated_text = tokenizer.decode(ids)
@@ -122,9 +148,9 @@ def main():
     print(f"模型参数量: {sum(p.data.size for p in model.parameters())/1e6:.2f}M")
 
     presets = {
-        "1": {"name": "保守模式", "temp": 0.65, "tokens": 80},
-        "2": {"name": "平衡模式", "temp": 0.80, "tokens": 120},
-        "3": {"name": "创意模式", "temp": 1.00, "tokens": 160},
+        "1": {"name": "保守模式", "temp": 0.65, "tokens": 80, "top_p": 0.85, "top_k": 20, "rp": 1.05},
+        "2": {"name": "平衡模式", "temp": 0.80, "tokens": 120, "top_p": 0.92, "top_k": 40, "rp": 1.08},
+        "3": {"name": "创意模式", "temp": 1.00, "tokens": 160, "top_p": 0.98, "top_k": 80, "rp": 1.10},
     }
 
     print("\n" + "=" * 50)
@@ -149,6 +175,9 @@ def main():
             tokenizer,
             max_new_tokens=current_preset["tokens"],
             temperature=current_preset["temp"],
+            top_k=current_preset["top_k"],
+            top_p=current_preset["top_p"],
+            repetition_penalty=current_preset["rp"],
         )
         print(f"\n生成结果 [{current_preset['name']}]:\n{generated}\n")
         print("-" * 50)

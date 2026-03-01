@@ -6,6 +6,7 @@ import pickle
 import numpy as np
 
 from app.core.models import TinyLM, TransformerLM
+from app.core.sampling import SamplingConfig, sample_next_token
 from app.core.tokenizer import CharTokenizer
 
 
@@ -91,6 +92,7 @@ def quick_test():
                 f"checkpoint 参数形状不匹配: {key}, src={src.shape}, dst={p.data.shape}"
             )
         p.data[...] = src
+    model.eval()
 
     test_prompts = [
         "Once upon a time",
@@ -99,9 +101,9 @@ def quick_test():
     ]
 
     test_configs = [
-        {"name": "保守模式", "temp": 0.7, "tokens": 80},
-        {"name": "平衡模式", "temp": 0.8, "tokens": 120},
-        {"name": "创意模式", "temp": 1.0, "tokens": 150},
+        {"name": "保守模式", "temp": 0.7, "tokens": 80, "top_p": 0.85, "top_k": 20, "rp": 1.05},
+        {"name": "平衡模式", "temp": 0.8, "tokens": 120, "top_p": 0.92, "top_k": 40, "rp": 1.08},
+        {"name": "创意模式", "temp": 1.0, "tokens": 150, "top_p": 0.98, "top_k": 80, "rp": 1.10},
     ]
 
     for prompt in test_prompts:
@@ -110,8 +112,19 @@ def quick_test():
         print(f"{'='*60}")
 
         for cfg in test_configs:
-            print(f"\n🔧 {cfg['name']} (temp={cfg['temp']}, tokens={cfg['tokens']})")
+            print(
+                f"\n🔧 {cfg['name']} (temp={cfg['temp']}, top_p={cfg['top_p']}, "
+                f"top_k={cfg['top_k']}, rp={cfg['rp']}, tokens={cfg['tokens']})"
+            )
             print("-" * 60)
+            sampling_cfg = SamplingConfig(
+                temperature=cfg["temp"],
+                top_k=cfg["top_k"],
+                top_p=cfg["top_p"],
+                repetition_penalty=cfg["rp"],
+                seed=42,
+            )
+            rng = np.random.default_rng(sampling_cfg.seed)
 
             ids = tokenizer.encode(prompt)
             if not ids:
@@ -122,11 +135,12 @@ def quick_test():
                 ctx = ids[-max_ctx:] if isinstance(max_ctx, int) and max_ctx > 0 else ids
                 x = np.array([ctx], dtype=np.int64)
                 logits, _ = model(x, None)
-                next_logits = logits.data[0, -1] / max(cfg["temp"], 1e-6)
-                next_logits = next_logits - np.max(next_logits)
-                probs = np.exp(next_logits)
-                probs = probs / (probs.sum() + 1e-12)
-                next_id = int(np.random.choice(len(probs), p=probs))
+                next_id = sample_next_token(
+                    logits.data[0, -1],
+                    token_ids=ids,
+                    cfg=sampling_cfg,
+                    rng=rng,
+                )
                 ids.append(next_id)
 
             generated_text = tokenizer.decode(ids)

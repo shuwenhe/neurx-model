@@ -9,13 +9,18 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from app.core.models import TinyLM, TransformerLM
+from app.core.sampling import SamplingConfig, sample_next_token
 from app.core.tokenizer import CharTokenizer
 
 
 class GenerateRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=4096)
     max_new_tokens: int = Field(default=64, ge=1, le=256)
-    temperature: float = Field(default=1.0, gt=0.0, le=2.0)
+    temperature: float = Field(default=0.8, ge=0.0, le=2.0)
+    top_k: int | None = Field(default=40, ge=1, le=1024)
+    top_p: float = Field(default=0.92, gt=0.0, le=1.0)
+    repetition_penalty: float = Field(default=1.08, ge=1.0, le=2.0)
+    seed: int | None = Field(default=None, ge=0)
 
 
 class GenerateResponse(BaseModel):
@@ -107,12 +112,14 @@ def _load_or_init():
                 )
             p.data[...] = src
 
+        model.eval()
         state.model = model
         state.tokenizer = tok
         return
 
     tok = CharTokenizer.from_texts(["你好，世界", "自研后端服务"]) 
     state.model = TinyLM(vocab_size=tok.vocab_size, n_embd=128)
+    state.model.eval()
     state.tokenizer = tok
 
 
@@ -131,6 +138,16 @@ def generate(req: GenerateRequest):
     if state.model is None or state.tokenizer is None:
         raise HTTPException(status_code=503, detail="model not ready")
 
+    sampling_cfg = SamplingConfig(
+        temperature=req.temperature,
+        top_k=req.top_k,
+        top_p=req.top_p,
+        repetition_penalty=req.repetition_penalty,
+        seed=req.seed,
+    )
+    sampling_cfg.validate()
+    rng = np.random.default_rng(req.seed)
+
     ids = state.tokenizer.encode(req.prompt)
     if not ids:
         ids = [0]
@@ -140,12 +157,12 @@ def generate(req: GenerateRequest):
         ctx = ids[-max_ctx:] if isinstance(max_ctx, int) and max_ctx > 0 else ids
         x = np.array([ctx], dtype=np.int64)
         logits, _ = state.model(x, None)
-        next_logits = logits.data[0, -1]
-        next_logits = next_logits / req.temperature
-        next_logits = next_logits - np.max(next_logits)
-        probs = np.exp(next_logits)
-        probs = probs / (probs.sum() + 1e-12)
-        next_id = int(np.random.choice(len(probs), p=probs))
+        next_id = sample_next_token(
+            logits.data[0, -1],
+            token_ids=ids,
+            cfg=sampling_cfg,
+            rng=rng,
+        )
         ids.append(next_id)
 
     text = state.tokenizer.decode(ids)

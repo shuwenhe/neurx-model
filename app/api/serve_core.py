@@ -2,6 +2,8 @@
 
 import os
 import pickle
+import time
+import uuid
 from dataclasses import dataclass
 
 import numpy as np
@@ -25,6 +27,24 @@ class GenerateRequest(BaseModel):
 
 class GenerateResponse(BaseModel):
     text: str
+
+
+class ChatMessage(BaseModel):
+    role: str = Field(pattern="^(system|user|assistant)$")
+    content: str = Field(min_length=1, max_length=8192)
+
+
+class ChatCompletionsRequest(BaseModel):
+    model: str = Field(default="core-transformer")
+    messages: list[ChatMessage] = Field(min_length=1)
+    max_tokens: int = Field(default=128, ge=1, le=512)
+    temperature: float = Field(default=0.8, ge=0.0, le=2.0)
+    top_p: float = Field(default=0.92, gt=0.0, le=1.0)
+    top_k: int | None = Field(default=40, ge=1, le=1024)
+    repetition_penalty: float = Field(default=1.08, ge=1.0, le=2.0)
+    seed: int | None = Field(default=None, ge=0)
+    stream: bool = Field(default=False)
+    stop: str | list[str] | None = None
 
 
 @dataclass
@@ -133,6 +153,67 @@ def health():
     return {"status": "ok", "backend": "core"}
 
 
+@app.get("/v1/models")
+def list_models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "core-transformer",
+                "object": "model",
+                "created": 0,
+                "owned_by": "self-hosted-core",
+            }
+        ],
+    }
+
+
+def _build_prompt(messages: list[ChatMessage]) -> str:
+    lines = []
+    for m in messages:
+        if m.role == "system":
+            lines.append(f"[System]\n{m.content}")
+        elif m.role == "user":
+            lines.append(f"[User]\n{m.content}")
+        else:
+            lines.append(f"[Assistant]\n{m.content}")
+    lines.append("[Assistant]\n")
+    return "\n\n".join(lines)
+
+
+def _generate_ids(
+    initial_ids: list[int],
+    max_new_tokens: int,
+    sampling_cfg: SamplingConfig,
+    stop_sequences: list[str],
+) -> tuple[list[int], str]:
+    rng = np.random.default_rng(sampling_cfg.seed)
+    ids = initial_ids[:]
+    max_ctx = getattr(state.model, "max_seq_len", None)
+    generated_text = ""
+
+    for _ in range(max_new_tokens):
+        ctx = ids[-max_ctx:] if isinstance(max_ctx, int) and max_ctx > 0 else ids
+        x = np.array([ctx], dtype=np.int64)
+        logits, _ = state.model(x, None)
+        next_id = sample_next_token(
+            logits.data[0, -1],
+            token_ids=ids,
+            cfg=sampling_cfg,
+            rng=rng,
+        )
+        ids.append(next_id)
+
+        if stop_sequences:
+            generated_text = state.tokenizer.decode(ids)
+            for stop_seq in stop_sequences:
+                if stop_seq and stop_seq in generated_text:
+                    cut_idx = generated_text.index(stop_seq)
+                    return ids, generated_text[:cut_idx]
+
+    return ids, state.tokenizer.decode(ids)
+
+
 @app.post("/v1/generate", response_model=GenerateResponse)
 def generate(req: GenerateRequest):
     if state.model is None or state.tokenizer is None:
@@ -146,27 +227,72 @@ def generate(req: GenerateRequest):
         seed=req.seed,
     )
     sampling_cfg.validate()
-    rng = np.random.default_rng(req.seed)
-
     ids = state.tokenizer.encode(req.prompt)
     if not ids:
         ids = [0]
 
-    max_ctx = getattr(state.model, "max_seq_len", None)
-    for _ in range(req.max_new_tokens):
-        ctx = ids[-max_ctx:] if isinstance(max_ctx, int) and max_ctx > 0 else ids
-        x = np.array([ctx], dtype=np.int64)
-        logits, _ = state.model(x, None)
-        next_id = sample_next_token(
-            logits.data[0, -1],
-            token_ids=ids,
-            cfg=sampling_cfg,
-            rng=rng,
-        )
-        ids.append(next_id)
-
-    text = state.tokenizer.decode(ids)
+    ids, text = _generate_ids(
+        initial_ids=ids,
+        max_new_tokens=req.max_new_tokens,
+        sampling_cfg=sampling_cfg,
+        stop_sequences=[],
+    )
     if text.startswith(req.prompt):
         text = text[len(req.prompt):]
 
     return GenerateResponse(text=text)
+
+
+@app.post("/v1/chat/completions")
+def chat_completions(req: ChatCompletionsRequest):
+    if req.stream:
+        raise HTTPException(status_code=400, detail="stream=true is not supported yet")
+    if state.model is None or state.tokenizer is None:
+        raise HTTPException(status_code=503, detail="model not ready")
+
+    sampling_cfg = SamplingConfig(
+        temperature=req.temperature,
+        top_k=req.top_k,
+        top_p=req.top_p,
+        repetition_penalty=req.repetition_penalty,
+        seed=req.seed,
+    )
+    sampling_cfg.validate()
+
+    prompt = _build_prompt(req.messages)
+    prompt_ids = state.tokenizer.encode(prompt)
+    if not prompt_ids:
+        prompt_ids = [0]
+
+    stop_sequences = [req.stop] if isinstance(req.stop, str) else (req.stop or [])
+    ids, full_text = _generate_ids(
+        initial_ids=prompt_ids,
+        max_new_tokens=req.max_tokens,
+        sampling_cfg=sampling_cfg,
+        stop_sequences=stop_sequences,
+    )
+    completion_text = full_text[len(prompt):] if full_text.startswith(prompt) else full_text
+
+    usage_prompt_tokens = len(prompt_ids)
+    usage_total_tokens = len(ids)
+    usage_completion_tokens = max(0, usage_total_tokens - usage_prompt_tokens)
+    created = int(time.time())
+
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion",
+        "created": created,
+        "model": req.model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": completion_text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": usage_prompt_tokens,
+            "completion_tokens": usage_completion_tokens,
+            "total_tokens": usage_total_tokens,
+        },
+    }

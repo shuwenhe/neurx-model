@@ -292,8 +292,8 @@ class MultiHeadAttention(Module):
         self.attn_dropout = Dropout(dropout)
         self.resid_dropout = Dropout(dropout)
         
-        # 因果遮罩（下三角矩阵）
-        self.causal_mask = np.tril(np.ones((max_seq_len, max_seq_len)))
+        # 因果遮罩（下三角布尔矩阵）
+        self.causal_mask = np.tril(np.ones((max_seq_len, max_seq_len), dtype=bool))
     
     def __call__(self, x):
         B, T, C = x.data.shape
@@ -314,7 +314,8 @@ class MultiHeadAttention(Module):
         
         # 应用因果遮罩（将上三角设为很小的值）
         mask = self.causal_mask[:T, :T]
-        att = np.where(mask == 1, att, -1e9)
+        mask_value = np.finfo(att.dtype).min
+        att = np.where(mask, att, mask_value)
         
         # Softmax
         att = self._softmax(att, axis=-1)
@@ -351,7 +352,7 @@ class MultiHeadAttention(Module):
             dscore = att * (datt - sum_gs)
 
             # masked positions are constants (-1e9), stop gradient
-            dscore = np.where(mask[None, None, :, :] == 1, dscore, 0.0)
+            dscore = np.where(mask[None, None, :, :], dscore, 0.0)
 
             scale = 1.0 / np.sqrt(self.head_dim)
             dscore = dscore * scale
@@ -375,9 +376,15 @@ class MultiHeadAttention(Module):
     
     def _softmax(self, x, axis=-1):
         """数值稳定的 softmax"""
+        orig_dtype = x.dtype
+        if np.issubdtype(orig_dtype, np.floating) and orig_dtype.itemsize < np.dtype(np.float64).itemsize:
+            x = x.astype(np.float64, copy=False)
         x_max = x.max(axis=axis, keepdims=True)
         exp_x = np.exp(x - x_max)
-        return exp_x / exp_x.sum(axis=axis, keepdims=True)
+        denom = exp_x.sum(axis=axis, keepdims=True)
+        tiny = np.finfo(exp_x.dtype).tiny
+        out = exp_x / np.maximum(denom, tiny)
+        return out.astype(orig_dtype, copy=False) if out.dtype != orig_dtype else out
 
 
 class MLP(Module):

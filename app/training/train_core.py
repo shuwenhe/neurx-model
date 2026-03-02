@@ -7,7 +7,7 @@ import pickle
 import numpy as np
 
 from app.core.models import TransformerLM
-from app.core.optim import AdamW
+from tensor.core.optim import AdamW, clip_grad_norm
 from app.core.tokenizer import CharTokenizer
 
 
@@ -51,7 +51,29 @@ def _make_batches(token_ids, batch_size, seq_len):
         yield x, y
 
 
-def train_core(batch_size=8, epochs=3, learning_rate=3e-3, output="checkpoints/model_core.pkl"):
+def _cosine_lr(step, total_steps, base_lr, min_lr, warmup_steps):
+    if step < warmup_steps:
+        return base_lr * float(step + 1) / max(1, warmup_steps)
+    if step >= total_steps:
+        return min_lr
+    progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+    cosine = 0.5 * (1.0 + np.cos(np.pi * progress))
+    return min_lr + (base_lr - min_lr) * cosine
+
+
+def train_core(
+    batch_size=8,
+    epochs=3,
+    learning_rate=3e-3,
+    output="checkpoints/model_core.pkl",
+    grad_clip=1.0,
+    warmup_ratio=0.1,
+    min_lr_ratio=0.1,
+    use_rmsnorm=False,
+    use_swiglu=False,
+    use_rope=False,
+    rope_theta=10000.0,
+):
     np.random.seed(42)
 
     texts = _sample_corpus()
@@ -67,12 +89,18 @@ def train_core(batch_size=8, epochs=3, learning_rate=3e-3, output="checkpoints/m
         n_layers=4,
         n_heads=8,
         max_seq_len=seq_len,
-        dropout=0.1
+        dropout=0.1,
+        use_rmsnorm=use_rmsnorm,
+        use_swiglu=use_swiglu,
+        use_rope=use_rope,
+        rope_theta=rope_theta,
     )
     optimizer = AdamW(model.parameters(), lr=learning_rate)
 
     steps_per_epoch = 10
     total_steps = max(1, epochs * steps_per_epoch)
+    warmup_steps = int(total_steps * warmup_ratio)
+    min_lr = learning_rate * min_lr_ratio
     batches = _make_batches(all_tokens, batch_size=batch_size, seq_len=seq_len)
 
     losses = []
@@ -81,10 +109,15 @@ def train_core(batch_size=8, epochs=3, learning_rate=3e-3, output="checkpoints/m
         optimizer.zero_grad()
         _, loss = model(x, y)
         loss.backward()
+        grad_norm = clip_grad_norm(model.parameters(), grad_clip)
+        optimizer.lr = _cosine_lr(step, total_steps, learning_rate, min_lr, warmup_steps)
         optimizer.step()
         losses.append(loss.item())
         if step % 5 == 0 or step == total_steps - 1:
-            print(f"step {step+1}/{total_steps}: loss={loss.item():.4f}")
+            print(
+                f"step {step+1}/{total_steps}: "
+                f"loss={loss.item():.4f}, lr={optimizer.lr:.6f}, grad_norm={grad_norm:.4f}"
+            )
 
     os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
     state_dict = {f"param_{i}": p.data.copy() for i, p in enumerate(model.parameters())}
@@ -97,6 +130,10 @@ def train_core(batch_size=8, epochs=3, learning_rate=3e-3, output="checkpoints/m
             "n_heads": 8,
             "max_seq_len": seq_len,
             "dropout": 0.1,
+            "use_rmsnorm": use_rmsnorm,
+            "use_swiglu": use_swiglu,
+            "use_rope": use_rope,
+            "rope_theta": rope_theta,
             "state_dict": state_dict,
         },
         "tokenizer": tokenizer.to_dict(),
@@ -119,6 +156,13 @@ def main():
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=3e-3)
     parser.add_argument("--output", type=str, default="checkpoints/model_core.pkl")
+    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--warmup-ratio", type=float, default=0.1)
+    parser.add_argument("--min-lr-ratio", type=float, default=0.1)
+    parser.add_argument("--use-rmsnorm", action="store_true")
+    parser.add_argument("--use-swiglu", action="store_true")
+    parser.add_argument("--use-rope", action="store_true")
+    parser.add_argument("--rope-theta", type=float, default=10000.0)
     parser.add_argument("--checkpoint", type=str, default="", help="保留参数兼容，当前未使用")
     args = parser.parse_args()
 
@@ -127,6 +171,13 @@ def main():
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         output=args.output,
+        grad_clip=args.grad_clip,
+        warmup_ratio=args.warmup_ratio,
+        min_lr_ratio=args.min_lr_ratio,
+        use_rmsnorm=args.use_rmsnorm,
+        use_swiglu=args.use_swiglu,
+        use_rope=args.use_rope,
+        rope_theta=args.rope_theta,
     )
 
 

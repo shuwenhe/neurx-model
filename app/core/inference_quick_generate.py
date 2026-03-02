@@ -48,6 +48,10 @@ def _infer_transformer_config(model_cfg):
         "n_heads": int(n_heads),
         "max_seq_len": max_seq_len,
         "dropout": float(model_cfg.get("dropout", 0.1)),
+        "use_rmsnorm": bool(model_cfg.get("use_rmsnorm", False)),
+        "use_swiglu": bool(model_cfg.get("use_swiglu", False)),
+        "use_rope": bool(model_cfg.get("use_rope", False)),
+        "rope_theta": float(model_cfg.get("rope_theta", 10000.0)),
     }
 
 
@@ -78,6 +82,10 @@ def quick_test():
             n_heads=transformer_cfg["n_heads"],
             max_seq_len=transformer_cfg["max_seq_len"],
             dropout=transformer_cfg["dropout"],
+            use_rmsnorm=transformer_cfg["use_rmsnorm"],
+            use_swiglu=transformer_cfg["use_swiglu"],
+            use_rope=transformer_cfg["use_rope"],
+            rope_theta=transformer_cfg["rope_theta"],
         )
     else:
         model = TinyLM(vocab_size=model_cfg["vocab_size"], n_embd=model_cfg["n_embd"])
@@ -130,18 +138,30 @@ def quick_test():
             if not ids:
                 ids = [0]
 
-            max_ctx = getattr(model, "max_seq_len", None)
-            for _ in range(cfg["tokens"]):
-                ctx = ids[-max_ctx:] if isinstance(max_ctx, int) and max_ctx > 0 else ids
-                x = np.array([ctx], dtype=np.int64)
-                logits, _ = model(x, None)
-                next_id = sample_next_token(
-                    logits.data[0, -1],
-                    token_ids=ids,
-                    cfg=sampling_cfg,
-                    rng=rng,
+            if hasattr(model, "generate"):
+                generated_ids = model.generate(
+                    ids,
+                    max_new_tokens=cfg["tokens"],
+                    temperature=cfg["temp"],
+                    top_k=cfg["top_k"],
+                    top_p=cfg["top_p"],
+                    repetition_penalty=cfg["rp"],
+                    seed=42,
                 )
-                ids.append(next_id)
+                ids = generated_ids if isinstance(generated_ids, list) else generated_ids[0].tolist()
+            else:
+                max_ctx = getattr(model, "max_seq_len", None)
+                for _ in range(cfg["tokens"]):
+                    ctx = ids[-max_ctx:] if isinstance(max_ctx, int) and max_ctx > 0 else ids
+                    x = np.array([ctx], dtype=np.int64)
+                    logits, _ = model(x, None)
+                    next_id = sample_next_token(
+                        logits.data[0, -1],
+                        token_ids=ids,
+                        cfg=sampling_cfg,
+                        rng=rng,
+                    )
+                    ids.append(next_id)
 
             generated_text = tokenizer.decode(ids)
             print(generated_text)

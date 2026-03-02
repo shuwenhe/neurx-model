@@ -6,8 +6,8 @@ from app.core.gpt_model import (
     CausalSelfAttention,
     MLP,
 )
-from app.core.nn import LayerNorm, GELU, Dropout
+from tensor.core.nn import LayerNorm, GELU, Dropout, MoE
 from app.modeling.config import ModelConfig
 
 # 导出给外部使用
-__all__ = ['GPT', 'Block', 'CausalSelfAttention', 'MLP', 'LayerNorm', 'ModelConfig']
+__all__ = ['GPT', 'Block', 'CausalSelfAttention', 'MLP', 'MoE', 'LayerNorm', 'ModelConfig']

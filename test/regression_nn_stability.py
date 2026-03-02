@@ -2,8 +2,8 @@
 
 import numpy as np
 
-from app.core.nn import LayerNorm, MultiHeadAttention
-from app.core.tensor import Tensor
+from tensor.core.nn import LayerNorm, MultiHeadAttention
+from tensor.core.tensor import Tensor
 
 
 def _finite_diff_grad(

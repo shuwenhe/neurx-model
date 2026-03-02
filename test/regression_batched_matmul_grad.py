@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from app.core.tensor import Tensor
+from tensor.core.tensor import Tensor
 
 
 def run_regression_batched_matmul_grad() -> None:

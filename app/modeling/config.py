@@ -13,6 +13,19 @@ class ModelConfig:
     dropout = 0.1
     bias = True  # 是否在Linear和LayerNorm中使用bias
 
+    # MoE（Mixture of Experts）
+    moe_enabled = False
+    moe_num_experts = 4
+    moe_top_k = 2
+    moe_hidden_dim = None  # None -> 4 * n_embd
+
+    # 架构改进
+    rmsnorm_enabled = False
+    rmsnorm_bias = False
+    swiglu_enabled = False
+    rope_enabled = False
+    rope_theta = 10000.0
+
     # 多模态（可选）
     multimodal_enabled = False
     modality_dropout = 0.0

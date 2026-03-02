@@ -3,7 +3,7 @@
 import numpy as np
 
 from app.core.models import TinyLM
-from app.core.optim import AdamW
+from tensor.core.optim import AdamW
 
 
 def run_step3_mini_train_check() -> None:

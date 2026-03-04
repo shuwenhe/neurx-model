@@ -219,12 +219,23 @@ train-multimodal:
 train-chinese:
 	@echo "开始训练中文文本能力..."
 	@echo "batch_size=$(CHINESE_BATCH_SIZE), epochs=$(CHINESE_EPOCHS), lr=$(CHINESE_LR)"
-	$(PYTHON) -m app.training.train_core \
+	$(PYTHON) -m app.training.train_simple_neurx \
 		--batch-size $(CHINESE_BATCH_SIZE) \
 		--epochs $(CHINESE_EPOCHS) \
 		--learning-rate $(CHINESE_LR) \
 		--checkpoint $(CHINESE_CHECKPOINT) \
-		--output checkpoints/model_core.pkl
+		--output $(CHINESE_OUTPUT)
+
+# NeurX 框架训练（推荐）
+train-neurx:
+	@echo "开始使用 NeurX 框架训练..."
+	@echo "batch_size=4, epochs=3, lr=1e-4"
+	$(PYTHON) -m app.training.train_simple_neurx \
+		--batch-size 4 \
+		--epochs 3 \
+		--learning-rate 1e-4 \
+		--hidden-dim 256 \
+		--num-layers 2
 
 # 推理服务（开发）
 serve-dev:

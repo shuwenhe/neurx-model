@@ -1,4 +1,4 @@
-"""自研后端训练主链路（纯 numpy）"""
+"""自研后端训练主链路（使用 NeurX 框架）"""
 
 import argparse
 import os
@@ -6,9 +6,43 @@ import pickle
 
 import numpy as np
 
-from app.core.models import TransformerLM
-from tensor.core.optim import AdamW, clip_grad_norm
+try:
+    # Try using NeurX models first
+    from app.core.models_neurx import NeurXChatModel
+    from neurx.optim import Adam as AdamW
+    import neurx as nn
+    BACKEND = "neurx"
+except ImportError:
+    # Fallback to tensor models if available
+    try:
+        from app.core.models import TransformerLM
+        from tensor.core.optim import AdamW, clip_grad_norm
+        BACKEND = "tensor"
+    except ImportError:
+        raise ImportError(
+            "Neither 'neurx' nor 'tensor' framework found. "
+            "Please install: pip install /home/shuwen/neurx"
+        )
+
 from app.core.tokenizer import CharTokenizer
+
+# Helper for gradient clipping in NeurX
+def clip_grad_norm(parameters, max_norm):
+    """Clip gradient norm for stability"""
+    total_norm = 0.0
+    for p in parameters:
+        if hasattr(p, 'grad') and p.grad is not None:
+            param_norm = np.linalg.norm(p.grad.flatten())
+            total_norm += param_norm ** 2
+    total_norm = np.sqrt(total_norm)
+    
+    if total_norm > max_norm:
+        clip_coef = max_norm / (total_norm + 1e-6)
+        for p in parameters:
+            if hasattr(p, 'grad') and p.grad is not None:
+                p.grad *= clip_coef
+    
+    return float(total_norm)
 
 
 def _sample_corpus():
@@ -83,18 +117,33 @@ def train_core(
         all_tokens.extend(tokenizer.encode(t))
 
     seq_len = 64
-    model = TransformerLM(
-        vocab_size=tokenizer.vocab_size,
-        n_embd=512,
-        n_layers=4,
-        n_heads=8,
-        max_seq_len=seq_len,
-        dropout=0.1,
-        use_rmsnorm=use_rmsnorm,
-        use_swiglu=use_swiglu,
-        use_rope=use_rope,
-        rope_theta=rope_theta,
-    )
+    
+    # Create model using appropriate backend
+    if BACKEND == "neurx":
+        # Use NeurX model (parameter names: hidden_dim, num_layers, num_heads)
+        model = NeurXChatModel(
+            vocab_size=tokenizer.vocab_size,
+            hidden_dim=512,
+            num_layers=4,
+            num_heads=8,
+            max_seq_len=seq_len,
+            dropout=0.1,
+        )
+    else:
+        # Use tensor model (parameter names: n_embd, n_layers, n_heads)
+        model = TransformerLM(
+            vocab_size=tokenizer.vocab_size,
+            n_embd=512,
+            n_layers=4,
+            n_heads=8,
+            max_seq_len=seq_len,
+            dropout=0.1,
+            use_rmsnorm=use_rmsnorm,
+            use_swiglu=use_swiglu,
+            use_rope=use_rope,
+            rope_theta=rope_theta,
+        )
+    
     optimizer = AdamW(model.parameters(), lr=learning_rate)
 
     steps_per_epoch = 10
@@ -107,22 +156,47 @@ def train_core(
     for step in range(total_steps):
         x, y = next(batches)
         optimizer.zero_grad()
-        _, loss = model(x, y)
+        
+        if BACKEND == "neurx":
+            # NeurX forward pass
+            output = model(x)  # Shape: (batch, seq_len, vocab_size)
+            # Reshape for loss computation
+            logits = output.reshape(-1, tokenizer.vocab_size)
+            targets = y.reshape(-1)
+            loss = nn.losses.cross_entropy(logits, targets)
+        else:
+            # Tensor model forward pass
+            _, loss = model(x, y)
+        
         loss.backward()
         grad_norm = clip_grad_norm(model.parameters(), grad_clip)
         optimizer.lr = _cosine_lr(step, total_steps, learning_rate, min_lr, warmup_steps)
         optimizer.step()
-        losses.append(loss.item())
+        
+        # Extract loss value appropriately
+        loss_val = float(loss) if hasattr(loss, '__float__') else float(loss.item()) if hasattr(loss, 'item') else loss
+        losses.append(loss_val)
+        
         if step % 5 == 0 or step == total_steps - 1:
             print(
                 f"step {step+1}/{total_steps}: "
-                f"loss={loss.item():.4f}, lr={optimizer.lr:.6f}, grad_norm={grad_norm:.4f}"
+                f"loss={loss_val:.4f}, lr={optimizer.lr:.6f}, grad_norm={grad_norm:.4f}"
             )
 
     os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
-    state_dict = {f"param_{i}": p.data.copy() for i, p in enumerate(model.parameters())}
+    
+    # Save checkpoint
+    if BACKEND == "neurx":
+        # Save NeurX model state
+        state_dict = {}
+        for i, p in enumerate(model.parameters()):
+            state_dict[f"param_{i}"] = p.data.copy() if hasattr(p.data, 'copy') else np.array(p.data)
+    else:
+        # Save tensor model state
+        state_dict = {f"param_{i}": p.data.copy() for i, p in enumerate(model.parameters())}
+    
     payload = {
-        "backend": "core",
+        "backend": BACKEND,
         "model": {
             "vocab_size": tokenizer.vocab_size,
             "n_embd": 512,
@@ -146,6 +220,7 @@ def train_core(
         pickle.dump(payload, f)
 
     print("✅ core 训练完成")
+    print(f"   backend={BACKEND}")
     print(f"   start_loss={losses[0]:.4f}, end_loss={losses[-1]:.4f}")
     print(f"   checkpoint={output}")
 

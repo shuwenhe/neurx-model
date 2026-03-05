@@ -1,5 +1,6 @@
 """自研后端 API 主链路（纯 numpy）"""
 
+import logging
 import os
 import pickle
 import time
@@ -10,7 +11,14 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from app.core.models import TinyLM, TransformerLM
+try:
+    from app.core.models import TinyLM, TransformerLM
+    MODEL_BACKEND = "tensor"
+except ImportError:
+    from app.core.models_neurx import NeurXTinyLM as TinyLM
+    from app.core.models_neurx import NeurXChatModel as TransformerLM
+    MODEL_BACKEND = "neurx"
+
 from app.core.sampling import SamplingConfig, sample_next_token
 from app.core.tokenizer import CharTokenizer
 
@@ -55,6 +63,23 @@ class State:
 
 state = State()
 app = FastAPI(title="LLM Core API", version="0.1.0")
+logger = logging.getLogger(__name__)
+
+
+def _to_numpy(value):
+    if hasattr(value, "data"):
+        value = value.data
+    if hasattr(value, "numpy"):
+        value = value.numpy()
+    return np.asarray(value)
+
+
+def _extract_logits(model_output):
+    if isinstance(model_output, tuple):
+        return model_output[0]
+    if isinstance(model_output, dict):
+        return model_output.get("logits")
+    return model_output
 
 
 def _infer_transformer_config(model_cfg):
@@ -99,9 +124,48 @@ def _infer_transformer_config(model_cfg):
     }
 
 
+def _build_tiny_model(vocab_size: int, hidden_dim: int = 128):
+    if MODEL_BACKEND == "neurx":
+        return TinyLM(vocab_size=vocab_size, hidden_dim=hidden_dim)
+    return TinyLM(vocab_size=vocab_size, n_embd=hidden_dim)
+
+
+def _build_transformer_model(cfg: dict):
+    if MODEL_BACKEND == "neurx":
+        return TransformerLM(
+            vocab_size=cfg["vocab_size"],
+            hidden_dim=cfg["n_embd"],
+            num_layers=cfg["n_layers"],
+            num_heads=cfg["n_heads"],
+            max_seq_len=cfg["max_seq_len"],
+            dropout=cfg["dropout"],
+        )
+    return TransformerLM(
+        vocab_size=cfg["vocab_size"],
+        n_embd=cfg["n_embd"],
+        n_layers=cfg["n_layers"],
+        n_heads=cfg["n_heads"],
+        max_seq_len=cfg["max_seq_len"],
+        dropout=cfg["dropout"],
+    )
+
+
+def _init_fallback_model():
+    tok = CharTokenizer.from_texts(["你好，世界", "自研后端服务"])
+    model = _build_tiny_model(vocab_size=tok.vocab_size, hidden_dim=128)
+    if hasattr(model, "eval"):
+        model.eval()
+    state.model = model
+    state.tokenizer = tok
+
+
 def _load_or_init():
     ckpt = os.getenv("LLM_CHECKPOINT", "checkpoints/model_core.pkl")
-    if os.path.exists(ckpt):
+    if not os.path.exists(ckpt):
+        _init_fallback_model()
+        return
+
+    try:
         with open(ckpt, "rb") as f:
             payload = pickle.load(f)
         tok = CharTokenizer.from_dict(payload["tokenizer"])
@@ -109,16 +173,12 @@ def _load_or_init():
 
         transformer_cfg = _infer_transformer_config(model_cfg)
         if transformer_cfg is not None:
-            model = TransformerLM(
-                vocab_size=transformer_cfg["vocab_size"],
-                n_embd=transformer_cfg["n_embd"],
-                n_layers=transformer_cfg["n_layers"],
-                n_heads=transformer_cfg["n_heads"],
-                max_seq_len=transformer_cfg["max_seq_len"],
-                dropout=transformer_cfg["dropout"],
-            )
+            model = _build_transformer_model(transformer_cfg)
         else:
-            model = TinyLM(vocab_size=model_cfg["vocab_size"], n_embd=model_cfg["n_embd"])
+            model = _build_tiny_model(
+                vocab_size=int(model_cfg["vocab_size"]),
+                hidden_dim=int(model_cfg.get("n_embd", 128)),
+            )
 
         state_dict = model_cfg["state_dict"]
         for i, p in enumerate(model.parameters()):
@@ -126,21 +186,20 @@ def _load_or_init():
             if key not in state_dict:
                 raise ValueError(f"checkpoint 缺少参数: {key}")
             src = state_dict[key]
-            if p.data.shape != src.shape:
+            dst = p.data if hasattr(p, "data") else p
+            if dst.shape != src.shape:
                 raise ValueError(
-                    f"checkpoint 参数形状不匹配: {key}, src={src.shape}, dst={p.data.shape}"
+                    f"checkpoint 参数形状不匹配: {key}, src={src.shape}, dst={dst.shape}"
                 )
-            p.data[...] = src
+            dst[...] = src
 
-        model.eval()
+        if hasattr(model, "eval"):
+            model.eval()
         state.model = model
         state.tokenizer = tok
-        return
-
-    tok = CharTokenizer.from_texts(["你好，世界", "自研后端服务"]) 
-    state.model = TinyLM(vocab_size=tok.vocab_size, n_embd=128)
-    state.model.eval()
-    state.tokenizer = tok
+    except Exception as exc:
+        logger.warning("加载 checkpoint 失败，回退到随机初始化: %s", exc)
+        _init_fallback_model()
 
 
 @app.on_event("startup")
@@ -195,9 +254,11 @@ def _generate_ids(
     for _ in range(max_new_tokens):
         ctx = ids[-max_ctx:] if isinstance(max_ctx, int) and max_ctx > 0 else ids
         x = np.array([ctx], dtype=np.int64)
-        logits, _ = state.model(x, None)
+        model_output = state.model(x, None)
+        logits = _extract_logits(model_output)
+        logits_np = _to_numpy(logits)
         next_id = sample_next_token(
-            logits.data[0, -1],
+            logits_np[0, -1],
             token_ids=ids,
             cfg=sampling_cfg,
             rng=rng,

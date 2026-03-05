@@ -159,10 +159,10 @@ def train_core(
         
         if BACKEND == "neurx":
             # NeurX forward pass
-            output = model(x, y)  # Returns dict with 'logits', 'loss', 'hidden_states'
-            if isinstance(output, dict):
-                logits = output['logits']
-                loss = output.get('loss')
+            model_output = model(x, y)  # Returns dict with 'logits', 'loss', 'hidden_states'
+            if isinstance(model_output, dict):
+                logits = model_output['logits']
+                loss = model_output.get('loss')
                 if loss is None:
                     # Reshape for loss computation if not provided by model
                     logits_reshaped = logits.reshape(-1, tokenizer.vocab_size)
@@ -170,7 +170,7 @@ def train_core(
                     loss = nn.losses.cross_entropy(logits_reshaped, targets)
             else:
                 # If output is just a tensor (for simpler models)
-                logits = output
+                logits = model_output
                 # Reshape for loss computation
                 logits_reshaped = logits.reshape(-1, tokenizer.vocab_size)
                 targets = y.reshape(-1)

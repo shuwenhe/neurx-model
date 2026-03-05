@@ -24,6 +24,44 @@ from app.core.sampling import SamplingConfig, sample_next_token
 from app.core.tokenizer import CharTokenizer
 
 
+class SimpleFFNCheckpointModel:
+    """兼容 train_simple_neurx.py 导出的简化 checkpoint（numpy 推理）。"""
+
+    def __init__(self, params: dict[str, np.ndarray], seq_len: int | None = None):
+        self.tok_emb = np.asarray(params["param_0"])  # (V, H)
+        self.fc1_w = np.asarray(params["param_1"])    # (H, 2H)
+        self.fc1_b = np.asarray(params["param_2"])    # (2H,)
+        self.fc2_w = np.asarray(params["param_3"])    # (2H, H)
+        self.fc2_b = np.asarray(params["param_4"])    # (H,)
+        self.out_w = np.asarray(params["param_5"])    # (H, V)
+        self.out_b = np.asarray(params["param_6"])    # (V,)
+
+        self.vocab_size = int(self.tok_emb.shape[0])
+        self.hidden_dim = int(self.tok_emb.shape[1])
+        self.max_seq_len = int(seq_len) if seq_len else None
+
+    @staticmethod
+    def _layer_norm(x: np.ndarray, eps: float = 1e-5) -> np.ndarray:
+        mean = x.mean(axis=-1, keepdims=True)
+        var = ((x - mean) ** 2).mean(axis=-1, keepdims=True)
+        return (x - mean) / np.sqrt(var + eps)
+
+    def __call__(self, input_ids, targets=None):
+        input_ids = np.asarray(input_ids, dtype=np.int64)
+        x = self.tok_emb[input_ids]  # (B, T, H)
+
+        residual = x
+        x = self._layer_norm(x)
+        x = x @ self.fc1_w + self.fc1_b
+        x = np.maximum(x, 0.0)
+        x = x @ self.fc2_w + self.fc2_b
+        x = x + residual
+
+        x = self._layer_norm(x)
+        logits = x @ self.out_w + self.out_b  # (B, T, V)
+        return logits
+
+
 class GenerateRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=4096)
     max_new_tokens: int = Field(default=64, ge=1, le=256)
@@ -94,8 +132,13 @@ def _extract_logits(model_output):
 
 
 def _infer_transformer_config(model_cfg):
-    state_dict = model_cfg["state_dict"]
-    n_embd = int(model_cfg["n_embd"])
+    state_dict = model_cfg.get("state_dict") or model_cfg.get("params")
+    if state_dict is None:
+        return None
+
+    n_embd = int(model_cfg.get("n_embd", model_cfg.get("hidden_dim", 0)))
+    if n_embd <= 0:
+        return None
 
     # 兼容旧 checkpoint：没有 n_layers/n_heads/max_seq_len 时，按参数形状推断 Transformer
     has_transformer_meta = all(k in model_cfg for k in ("n_layers", "n_heads", "max_seq_len"))
@@ -108,7 +151,7 @@ def _infer_transformer_config(model_cfg):
     if not has_transformer_meta and not looks_like_transformer:
         return None
 
-    max_seq_len = int(model_cfg.get("max_seq_len", state_dict["param_1"].shape[0]))
+    max_seq_len = int(model_cfg.get("max_seq_len", model_cfg.get("seq_len", state_dict["param_1"].shape[0])))
     n_layers = model_cfg.get("n_layers")
     if n_layers is None:
         inferred = (len(state_dict) - 5) / 12
@@ -182,27 +225,39 @@ def _load_or_init():
         tok = CharTokenizer.from_dict(payload["tokenizer"])
         model_cfg = payload["model"]
 
-        transformer_cfg = _infer_transformer_config(model_cfg)
-        if transformer_cfg is not None:
-            model = _build_transformer_model(transformer_cfg)
-        else:
-            model = _build_tiny_model(
-                vocab_size=int(model_cfg["vocab_size"]),
-                hidden_dim=int(model_cfg.get("n_embd", 128)),
-            )
+        state_dict = model_cfg.get("state_dict") or model_cfg.get("params")
+        if state_dict is None:
+            raise ValueError("checkpoint 缺少参数字典: state_dict/params")
 
-        state_dict = model_cfg["state_dict"]
-        for i, p in enumerate(model.parameters()):
-            key = f"param_{i}"
-            if key not in state_dict:
-                raise ValueError(f"checkpoint 缺少参数: {key}")
-            src = state_dict[key]
-            dst = p.data if hasattr(p, "data") else p
-            if dst.shape != src.shape:
-                raise ValueError(
-                    f"checkpoint 参数形状不匹配: {key}, src={src.shape}, dst={dst.shape}"
+        if all(f"param_{i}" in state_dict for i in range(7)) and "seq_len" in model_cfg:
+            model = SimpleFFNCheckpointModel(state_dict, seq_len=int(model_cfg.get("seq_len", 0)))
+        else:
+            transformer_cfg = _infer_transformer_config(model_cfg)
+            if transformer_cfg is not None:
+                model = _build_transformer_model(transformer_cfg)
+            else:
+                model = _build_tiny_model(
+                    vocab_size=int(model_cfg.get("vocab_size", tok.vocab_size)),
+                    hidden_dim=int(model_cfg.get("n_embd", model_cfg.get("hidden_dim", 128))),
                 )
-            dst[...] = src
+
+            for i, p in enumerate(model.parameters()):
+                key = f"param_{i}"
+                if key not in state_dict:
+                    raise ValueError(f"checkpoint 缺少参数: {key}")
+                src = state_dict[key]
+                dst = p.data if hasattr(p, "data") else p
+                if dst.shape != src.shape:
+                    raise ValueError(
+                        f"checkpoint 参数形状不匹配: {key}, src={src.shape}, dst={dst.shape}"
+                    )
+                dst[...] = src
+
+        logger.info(
+            "checkpoint 加载成功: backend=%s, vocab_size=%s",
+            payload.get("backend", "unknown"),
+            model_cfg.get("vocab_size", tok.vocab_size),
+        )
 
         if hasattr(model, "eval"):
             model.eval()
@@ -261,6 +316,7 @@ def _generate_ids(
     ids = initial_ids[:]
     max_ctx = getattr(state.model, "max_seq_len", None)
     generated_text = ""
+    unk_id = state.tokenizer.stoi.get("<unk>", None) if hasattr(state.tokenizer, "stoi") else None
 
     for _ in range(max_new_tokens):
         ctx = ids[-max_ctx:] if isinstance(max_ctx, int) and max_ctx > 0 else ids
@@ -268,6 +324,8 @@ def _generate_ids(
         model_output = state.model(x, None)
         logits = _extract_logits(model_output)
         logits_np = _to_numpy(logits)
+        if unk_id is not None and 0 <= unk_id < logits_np.shape[-1]:
+            logits_np[0, -1, unk_id] = -np.inf
         next_id = sample_next_token(
             logits_np[0, -1],
             token_ids=ids,
@@ -283,7 +341,7 @@ def _generate_ids(
                     cut_idx = generated_text.index(stop_seq)
                     return ids, generated_text[:cut_idx]
 
-    return ids, state.tokenizer.decode(ids)
+    return ids, state.tokenizer.decode(ids).replace("<unk>", "")
 
 
 @app.post("/v1/generate", response_model=GenerateResponse)

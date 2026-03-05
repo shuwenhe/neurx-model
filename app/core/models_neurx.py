@@ -11,6 +11,7 @@
 import numpy as np
 import neurx
 import neurx.nn as nn
+import neurx.nn.functional as F
 
 
 class NeurXTransformerBlock(nn.Module):

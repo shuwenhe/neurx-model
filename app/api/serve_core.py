@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 try:
@@ -63,6 +64,16 @@ class State:
 
 state = State()
 app = FastAPI(title="LLM Core API", version="0.1.0")
+
+# 配置 CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 在生产环境中应该指定具体的源
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 logger = logging.getLogger(__name__)
 
 

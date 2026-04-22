@@ -280,6 +280,11 @@ frontend-start:
 	@echo "启动前端(生产模式 - 端口3000)..."
 	cd frontend && npm run start
 
+# 启动前端(生产模式)并绑定端口8080，用于外部访问 /model
+frontend-start-8080:
+	@echo "启动前端(生产模式 - 端口8080, basePath=/model)..."
+	cd frontend && HOST=0.0.0.0 npm run start -- -p 8080
+
 # 可观测性栈（服务 + Prometheus + Grafana）
 obs-up:
 	@echo "启动可观测性栈..."

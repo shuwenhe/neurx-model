@@ -21,8 +21,6 @@ type GenerateResponse = {
   session_id?: string;
 };
 
-const DEFAULT_BASE = "http://localhost:8000";
-
 export default function Home() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConvId, setCurrentConvId] = useState<string | null>(null);
@@ -52,7 +50,10 @@ export default function Home() {
   const initialized = useRef(false);
 
   const apiBase = useMemo(() => {
-    return process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") || DEFAULT_BASE;
+    const fromEnv = process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "");
+    if (fromEnv) return fromEnv;
+    if (typeof window !== "undefined") return window.location.origin;
+    return "";
   }, []);
 
   const endpoint = `${apiBase}/v1/generate`;

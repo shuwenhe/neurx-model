@@ -16,7 +16,7 @@ systemctl daemon-reload
 
 echo "[3/6] Enable and restart backend/frontend services"
 if command -v fuser >/dev/null 2>&1; then
-	fuser -k 3000/tcp 2>/dev/null || true
+	fuser -k 3100/tcp 2>/dev/null || true
 	fuser -k 8000/tcp 2>/dev/null || true
 	fuser -k 8080/tcp 2>/dev/null || true
 fi

@@ -1,4 +1,4 @@
-.PHONY: help install test step1 step2 step3 bootstrap-check train train-basic train-core train-multimodal train-chinese train-neurx-dataset serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services
+.PHONY: help install test step1 step2 step3 bootstrap-check train train-basic train-core train-multimodal train-chinese train-neurx-dataset train-flow serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services
 
 # Python解释器（优先使用项目内虚拟环境）
 PYTHON := $(shell if [ -x ./venv/bin/python ]; then echo ./venv/bin/python; else echo python3; fi)
@@ -56,6 +56,7 @@ help:
 	@echo "  make train-chinese    - 训练中文文本能力"
 	@echo "  make train-multimodal - 完整多模态训练"
 	@echo "  make train-basic      - 基础文本训练"
+	@echo "  make train-flow       - 一键训练流(dataset -> checkpoint -> report)"
 	@echo "  make serve            - 启动推理API服务(使用统一模型)"
 	@echo "  make serve-dev        - 启动推理API服务(开发热更新)"
 	@echo "  make serve-core       - 启动自研后端API服务"
@@ -255,6 +256,10 @@ train-neurx-dataset:
 		--num-batches-per-epoch 50 \
 		--dataset-file dataset/text/neurx_train_mix_v1.txt \
 		--save-path checkpoints/model_neurx_dataset.pkl
+
+train-flow:
+	@echo "执行一键训练流..."
+	bash scripts/train_flow.sh
 
 # 推理服务（开发）
 serve-dev:

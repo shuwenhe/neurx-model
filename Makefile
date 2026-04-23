@@ -209,7 +209,14 @@ train-core:
 # 多模态训练
 train-multimodal:
 	@echo "开始多模态训练模型..."
-	LLM_MULTIMODAL=1 $(PYTHON) -m app.training.train
+	LLM_MULTIMODAL=1 $(PYTHON) -m app.training.train_vision_real \
+		--data-source local \
+		--data-path $(MULTIMODAL_DATA_PATH) \
+		--batch-size $(MULTIMODAL_BATCH_SIZE) \
+		--epochs $(MULTIMODAL_EPOCHS) \
+		--image-size $(MULTIMODAL_IMAGE_SIZE) \
+		--hidden-dim $(MULTIMODAL_HIDDEN_DIM) \
+		--output $(MULTIMODAL_OUTPUT)
 
 # 中文文本训练（支持参数覆盖）
 # 示例:

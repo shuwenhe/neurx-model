@@ -1,0 +1,16 @@
+[Unit]
+Description=NeurX Model Backend API (uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/app/neurx-model
+Environment=PYTHONPATH=/app/neurx-model
+Environment=LLM_CHECKPOINT=/app/neurx-model/checkpoints/model_core.pkl
+ExecStart=/app/neurx-model/venv/bin/python -m uvicorn app.api.serve:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

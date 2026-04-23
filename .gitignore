@@ -43,6 +43,7 @@ wandb/
 logs/
 *.log
 training.log
+*.pid
 
 # Data
 data/

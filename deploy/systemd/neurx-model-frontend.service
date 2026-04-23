@@ -1,0 +1,18 @@
+[Unit]
+Description=NeurX Model Frontend (Next.js)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/app/neurx-model/frontend
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=3000
+Environment=NEXT_PUBLIC_API_BASE=http://111.202.231.146:8080
+ExecStart=/usr/bin/env npm run start -- -p 3000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

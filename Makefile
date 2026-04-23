@@ -1,4 +1,4 @@
-.PHONY: help install test step1 step2 step3 bootstrap-check train train-basic train-core train-multimodal train-chinese serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all
+.PHONY: help install test step1 step2 step3 bootstrap-check train train-basic train-core train-multimodal train-chinese serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services
 
 # Python解释器（优先使用项目内虚拟环境）
 PYTHON := $(shell if [ -x ./venv/bin/python ]; then echo ./venv/bin/python; else echo python3; fi)
@@ -287,9 +287,9 @@ frontend-start:
 	@echo "启动前端(生产模式 - 端口3000)..."
 	cd frontend && npm run start
 
-# 启动前端(生产模式)并绑定端口8080，用于外部访问 /model
+# 启动前端(生产模式)并绑定端口8080，用于外部访问 /neurx
 frontend-start-8080:
-	@echo "启动前端(生产模式 - 端口8080, basePath=/model)..."
+	@echo "启动前端(生产模式 - 端口8080, basePath=/neurx)..."
 	cd frontend && HOST=0.0.0.0 npm run start -- -p 8080
 
 # 可观测性栈（服务 + Prometheus + Grafana）
@@ -442,3 +442,26 @@ init:
 	mkdir -p logs
 	mkdir -p data
 	@echo "✓ 目录创建完成"
+
+# 安装 systemd + nginx（需 root）
+install-systemd-nginx:
+	@echo "安装 systemd 和 nginx 反向代理配置..."
+	bash scripts/install_systemd_nginx.sh
+	@echo "${GREEN}✓ 部署配置完成${NC}"
+
+# 重启 systemd 服务
+restart-services:
+	@echo "重启后端和前端服务..."
+	systemctl restart neurx-model-backend.service neurx-model-frontend.service
+	@echo "${GREEN}✓ 服务已重启${NC}"
+
+# 查看服务状态
+status-services:
+	@echo "后端服务状态:"
+	@systemctl --no-pager --lines=30 status neurx-model-backend.service || true
+	@echo ""
+	@echo "前端服务状态:"
+	@systemctl --no-pager --lines=30 status neurx-model-frontend.service || true
+	@echo ""
+	@echo "Nginx 状态:"
+	@systemctl --no-pager --lines=30 status nginx || true

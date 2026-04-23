@@ -16,7 +16,6 @@ import numpy as np
 import neurx
 import neurx.nn as nn
 import neurx.optim as optim
-import neurx.functional as F
 
 from app.core.models_neurx import (
     create_chatmodel_tiny,
@@ -52,6 +51,23 @@ def get_sample_corpus():
     ] * 10
 
 
+def load_corpus(dataset_file=None):
+    """加载训练语料，优先使用 dataset 文件。"""
+    if dataset_file:
+        if not os.path.exists(dataset_file):
+            raise FileNotFoundError(f"Dataset file not found: {dataset_file}")
+
+        with open(dataset_file, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        if not lines:
+            raise ValueError(f"Dataset file is empty: {dataset_file}")
+
+        return lines
+
+    return get_sample_corpus()
+
+
 def char_tokenize(text):
     """简单的字符级分词"""
     return [ord(c) for c in text]
@@ -83,7 +99,7 @@ def tokenize_corpus(corpus):
         ids = [char_to_id[c] for c in text]
         token_ids.extend(ids)
     
-    return neurx.array(token_ids, dtype='int64'), len(chars), char_to_id
+    return np.array(token_ids, dtype=np.int64), len(chars), char_to_id
 
 
 def make_batches(token_ids, batch_size, seq_len, num_batches=100):
@@ -98,7 +114,7 @@ def make_batches(token_ids, batch_size, seq_len, num_batches=100):
     Yields:
         (input_ids, targets) 元组
     """
-    token_ids = neurx.asarray(token_ids, dtype='int64')
+    token_ids = np.asarray(token_ids, dtype=np.int64)
     num_tokens = token_ids.shape[0]
     
     if num_tokens < seq_len + 1:
@@ -108,13 +124,13 @@ def make_batches(token_ids, batch_size, seq_len, num_batches=100):
     
     for _ in range(num_batches):
         # 随机选择起点
-        starts = neurx.randint(0, max_start, (batch_size,))
+        starts = np.random.randint(0, max_start, size=batch_size)
         
         # 创建输入和目标
-        x = neurx.stack([token_ids[s:s + seq_len] for s in starts])  # (B, T)
-        y = neurx.stack([token_ids[s + 1:s + seq_len + 1] for s in starts])  # (B, T)
+        x = np.stack([token_ids[s:s + seq_len] for s in starts], axis=0)
+        y = np.stack([token_ids[s + 1:s + seq_len + 1] for s in starts], axis=0)
         
-        yield x, y
+        yield neurx.Tensor(x), neurx.Tensor(y)
 
 
 def train_one_epoch(model, optimizer, train_loader, epoch, args):
@@ -149,9 +165,17 @@ def train_one_epoch(model, optimizer, train_loader, epoch, args):
             total_norm = 0.0
             for p in model.parameters():
                 if p.grad is not None:
-                    param_norm = (p.grad ** 2).sum().sqrt()
-                    total_norm += param_norm ** 2
-            total_norm = total_norm.sqrt()
+                    grad_sq_sum = (p.grad ** 2).sum()
+                    if hasattr(grad_sq_sum, "sqrt"):
+                        param_norm = grad_sq_sum.sqrt()
+                        total_norm += param_norm ** 2
+                    else:
+                        total_norm += float(grad_sq_sum)
+
+            if not hasattr(total_norm, "sqrt"):
+                total_norm = float(np.sqrt(total_norm))
+            else:
+                total_norm = total_norm.sqrt()
             
             if total_norm > args.grad_clip:
                 for p in model.parameters():
@@ -192,16 +216,19 @@ def train_neurx(args):
     print("=" * 70)
     
     # 设置随机种子
-    neurx.manual_seed(args.seed)
+    if hasattr(neurx, "manual_seed"):
+        neurx.manual_seed(args.seed)
     np.random.seed(args.seed)
     
     # 获取数据
     print("\n[1/4] Preparing data...")
-    corpus = get_sample_corpus()
+    corpus = load_corpus(args.dataset_file)
     token_ids, vocab_size, char_to_id = tokenize_corpus(corpus)
     print(f"      Corpus size: {len(corpus)} texts")
     print(f"      Vocab size: {vocab_size}")
     print(f"      Total tokens: {len(token_ids)}")
+    if args.dataset_file:
+        print(f"      Dataset file: {args.dataset_file}")
     
     # 创建模型
     print(f"\n[2/4] Creating {args.model_size} model...")
@@ -275,8 +302,8 @@ def train_neurx(args):
             'char_to_id': char_to_id,
             'config': {
                 'model_size': args.model_size,
-                'hidden_dim': model.hidden_dim,
-                'num_layers': model.num_layers,
+                'hidden_dim': getattr(model, 'hidden_dim', None),
+                'num_layers': getattr(model, 'num_layers', None),
             }
         }
         
@@ -332,6 +359,12 @@ Examples:
     
     # 输出
     parser.add_argument('--save-path', type=str, default=None, help='Path to save model checkpoint')
+    parser.add_argument(
+        '--dataset-file',
+        type=str,
+        default='dataset/text/neurx_train_mix_v1.txt',
+        help='Text dataset file path, one sample per line'
+    )
     
     args = parser.parse_args()
     

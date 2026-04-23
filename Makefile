@@ -1,4 +1,4 @@
-.PHONY: help install test step1 step2 step3 bootstrap-check train train-basic train-core train-multimodal train-chinese serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services
+.PHONY: help install test step1 step2 step3 bootstrap-check train train-basic train-core train-multimodal train-chinese train-neurx-dataset serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services
 
 # Python解释器（优先使用项目内虚拟环境）
 PYTHON := $(shell if [ -x ./venv/bin/python ]; then echo ./venv/bin/python; else echo python3; fi)
@@ -243,6 +243,18 @@ train-neurx:
 		--learning-rate 1e-4 \
 		--hidden-dim 256 \
 		--num-layers 2
+
+train-neurx-dataset:
+	@echo "使用 dataset 目录语料训练 NeurX 模型..."
+	$(PYTHON) -m app.training.train_neurx \
+		--model-size tiny \
+		--num-epochs 1 \
+		--batch-size 8 \
+		--seq-len 64 \
+		--learning-rate 1e-4 \
+		--num-batches-per-epoch 50 \
+		--dataset-file dataset/text/neurx_train_mix_v1.txt \
+		--save-path checkpoints/model_neurx_dataset.pkl
 
 # 推理服务（开发）
 serve-dev:

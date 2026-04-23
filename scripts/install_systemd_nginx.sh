@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SYSTEMD_SRC_DIR="$ROOT_DIR/deploy/systemd"
 NGINX_SRC_CONF="$ROOT_DIR/deploy/nginx/neurx-model.conf"
 NGINX_SRC_LOCATIONS="$ROOT_DIR/deploy/nginx/neurx-model.locations.conf"
+NGINX_SRC_FORWARD_LOCATIONS="$ROOT_DIR/deploy/nginx/neurx-model-forwarded-8080.locations.conf"
 
 echo "[1/6] Install systemd unit files"
 install -m 0644 "$SYSTEMD_SRC_DIR/neurx-model-backend.service" /etc/systemd/system/neurx-model-backend.service
@@ -37,6 +38,17 @@ else
 	install -m 0644 "$NGINX_SRC_CONF" /etc/nginx/sites-available/neurx-model.conf
 	ln -sfn /etc/nginx/sites-available/neurx-model.conf /etc/nginx/sites-enabled/neurx-model.conf
 	rm -f /etc/nginx/conf.d/neurx-model.conf
+fi
+
+# Optional compatibility: some upstream environments forward external :8080 to local :80.
+# If aistudy.conf exists, inject forwarding rules for /neurx and API endpoints there.
+if [[ -f /etc/nginx/sites-available/aistudy.conf ]]; then
+	install -m 0644 "$NGINX_SRC_FORWARD_LOCATIONS" /etc/nginx/snippets/neurx-model-forwarded-8080.locations.conf
+	if ! grep -q "include /etc/nginx/snippets/neurx-model-forwarded-8080.locations.conf;" /etc/nginx/sites-available/aistudy.conf; then
+		sed -i '/server_name 111.202.231.146;/a\
+\
+		include /etc/nginx/snippets/neurx-model-forwarded-8080.locations.conf;' /etc/nginx/sites-available/aistudy.conf
+	fi
 fi
 
 echo "[5/6] Test and reload nginx"

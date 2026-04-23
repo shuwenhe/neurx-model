@@ -50,6 +50,14 @@ data/
 *.txt
 !requirements.txt
 
+# neurx-model training datasets (large files)
+dataset/huggingface/
+dataset/github/
+dataset/text/
+dataset/datasets.manifest.json
+!dataset/README.md
+!dataset/download_datasets.py
+
 # Mac
 .DS_Store
 

@@ -11,6 +11,7 @@
 import argparse
 import os
 import time
+from datetime import datetime
 import numpy as np
 
 import neurx
@@ -23,6 +24,18 @@ from app.core.models_neurx import (
     create_chatmodel_base,
     create_chatmodel_large,
 )
+
+
+def build_timestamped_save_path(save_path):
+    """在输出文件名末尾追加 YYYYMMDDHHMMSS 时间戳。"""
+    if not save_path:
+        return save_path
+
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    base, ext = os.path.splitext(save_path)
+    if not ext:
+        ext = ".pkl"
+    return f"{base}{timestamp}{ext}"
 
 
 def get_sample_corpus():
@@ -293,8 +306,9 @@ def train_neurx(args):
     
     # 保存模型
     if args.save_path:
-        print(f"\nSaving model to {args.save_path}...")
-        os.makedirs(os.path.dirname(args.save_path), exist_ok=True)
+        final_save_path = build_timestamped_save_path(args.save_path)
+        print(f"\nSaving model to {final_save_path}...")
+        os.makedirs(os.path.dirname(final_save_path), exist_ok=True)
         
         checkpoint = {
             'model_state': model.state_dict(),
@@ -309,7 +323,7 @@ def train_neurx(args):
         
         try:
             import pickle
-            with open(args.save_path, 'wb') as f:
+            with open(final_save_path, 'wb') as f:
                 pickle.dump(checkpoint, f)
             print(f"✓ Model saved successfully!")
         except Exception as e:

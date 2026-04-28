@@ -18,6 +18,7 @@ VISION_LR ?= 1e-4
 VISION_DATASET_NAME ?= nlphuji/flickr30k
 VISION_CHECKPOINT ?= $(CORE_MODEL_CHECKPOINT)
 VISION_OUTPUT ?= $(CORE_MODEL_CHECKPOINT)
+S_COMPILE_ALLOW_FAIL ?= 1
 
 # 中文文本训练参数（可在命令行覆盖）
 CHINESE_DATA_SOURCE ?= wikitext_zh
@@ -228,7 +229,8 @@ train-neurx-s-multimodal:
 		--epochs $(MULTIMODAL_EPOCHS) \
 		--image-size $(MULTIMODAL_IMAGE_SIZE) \
 		--hidden-dim $(MULTIMODAL_HIDDEN_DIM) \
-		--output $(MULTIMODAL_OUTPUT)
+		--output $(MULTIMODAL_OUTPUT) \
+		$$( [ "$(S_COMPILE_ALLOW_FAIL)" = "1" ] && echo "--allow-s-compile-fail" )
 
 # 中文文本训练（支持参数覆盖）
 # 示例:

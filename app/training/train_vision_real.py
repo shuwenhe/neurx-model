@@ -258,6 +258,7 @@ def train_vision_real(args) -> None:
         "runtime": {
             "s_compiler": getattr(args, "s_compiler", ""),
             "compiled_s_ir": getattr(args, "compiled_s_ir", []),
+            "s_compile_error": getattr(args, "s_compile_error", ""),
         },
     }
     with output_path.open("wb") as f:

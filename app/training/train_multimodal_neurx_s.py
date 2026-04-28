@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -11,12 +12,15 @@ from pathlib import Path
 from app.training.train_vision_real import train_vision_real
 
 
-S_SOURCE_FILES = [
-    "/app/neurx/s/tensor.s",
-    "/app/neurx/s/ops.s",
-    "/app/neurx/s/autograd.s",
-    "/app/neurx/s/schedule.s",
-]
+S_SOURCE_ROOT = "/app/neurx/s"
+
+
+def list_s_sources(root_dir: str) -> list[str]:
+    pattern = str(Path(root_dir).expanduser().resolve() / "*.s")
+    files = sorted(glob.glob(pattern))
+    if not files:
+        raise FileNotFoundError(f"No S sources found in: {root_dir}")
+    return files
 
 
 def resolve_s_compiler(explicit_path: str | None) -> str:
@@ -36,12 +40,12 @@ def resolve_s_compiler(explicit_path: str | None) -> str:
     return compiler
 
 
-def compile_s_runtime(compiler: str, out_dir: str) -> list[str]:
+def compile_s_runtime(compiler: str, out_dir: str, source_files: list[str]) -> list[str]:
     out_path = Path(out_dir).expanduser().resolve()
     out_path.mkdir(parents=True, exist_ok=True)
 
     compiled = []
-    for src in S_SOURCE_FILES:
+    for src in source_files:
         src_path = Path(src)
         if not src_path.exists():
             raise FileNotFoundError(f"Missing S runtime source: {src}")
@@ -54,6 +58,17 @@ def compile_s_runtime(compiler: str, out_dir: str) -> list[str]:
                 f"{src_path}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
             )
         compiled.append(str(ir_path))
+
+    manifest_path = out_path / "manifest.json"
+    manifest = {
+        "compiler": compiler,
+        "source_root": str(Path(S_SOURCE_ROOT).resolve()),
+        "sources": source_files,
+        "ir_files": compiled,
+    }
+    with manifest_path.open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=True, indent=2)
+
     return compiled
 
 
@@ -84,6 +99,17 @@ def build_parser() -> argparse.ArgumentParser:
         default="reports/s_ir",
         help="Directory for generated IR files",
     )
+    parser.add_argument(
+        "--s-source-root",
+        type=str,
+        default=S_SOURCE_ROOT,
+        help="Root directory of neurx S runtime sources",
+    )
+    parser.add_argument(
+        "--allow-s-compile-fail",
+        action="store_true",
+        help="Continue training when S runtime compile fails",
+    )
     return parser
 
 
@@ -92,19 +118,34 @@ def main() -> None:
     args = parser.parse_args()
 
     compiler = resolve_s_compiler(args.s_compiler or None)
-    compiled_ir = compile_s_runtime(compiler, args.s_ir_dir)
+    source_files = list_s_sources(args.s_source_root)
+
+    compiled_ir = []
+    compile_error = ""
+    try:
+        compiled_ir = compile_s_runtime(compiler, args.s_ir_dir, source_files)
+    except Exception as exc:
+        compile_error = str(exc)
+        if not args.allow_s_compile_fail:
+            raise
 
     print("=" * 70)
     print("NeurX Multimodal Training (S runtime preflight)")
     print("=" * 70)
     print(f"s_compiler={compiler}")
-    print(f"compiled_ir={len(compiled_ir)} files")
-    for path in compiled_ir:
-        print(f"  - {path}")
+    if compile_error:
+        print("s_compile_status=failed")
+        print(compile_error)
+    else:
+        print("s_compile_status=ok")
+        print(f"compiled_ir={len(compiled_ir)} files")
+        for path in compiled_ir:
+            print(f"  - {path}")
 
     args.backend = "neurx_s_latest"
     args.s_compiler = compiler
     args.compiled_s_ir = compiled_ir
+    args.s_compile_error = compile_error
 
     train_vision_real(args)
 

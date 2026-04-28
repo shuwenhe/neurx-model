@@ -237,7 +237,7 @@ def train_vision_real(args) -> None:
         )
 
     payload = {
-        "backend": "neurx",
+        "backend": getattr(args, "backend", "neurx"),
         "task": "vision_language",
         "model": {
             "vocab_size": tokenizer.vocab_size,
@@ -254,6 +254,10 @@ def train_vision_real(args) -> None:
             "start_loss": float(losses[0]) if losses else 0.0,
             "end_loss": float(losses[-1]) if losses else 0.0,
             "avg_loss": float(np.mean(losses)) if losses else 0.0,
+        },
+        "runtime": {
+            "s_compiler": getattr(args, "s_compiler", ""),
+            "compiled_s_ir": getattr(args, "compiled_s_ir", []),
         },
     }
     with output_path.open("wb") as f:

@@ -1,4 +1,4 @@
-.PHONY: help install test step1 step2 step3 bootstrap-check train train-basic train-core train-multimodal train-chinese train-neurx-dataset train-flow serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services
+.PHONY: help install test step1 step2 step3 bootstrap-check train train-basic train-core train-multimodal train-neurx-s-multimodal train-chinese train-neurx-dataset train-flow serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services
 
 # Python解释器（优先使用项目内虚拟环境）
 PYTHON := $(shell if [ -x ./venv/bin/python ]; then echo ./venv/bin/python; else echo python3; fi)
@@ -211,6 +211,17 @@ train-core:
 train-multimodal:
 	@echo "开始多模态训练模型..."
 	LLM_MULTIMODAL=1 $(PYTHON) -m app.training.train_vision_real \
+		--data-source local \
+		--data-path $(MULTIMODAL_DATA_PATH) \
+		--batch-size $(MULTIMODAL_BATCH_SIZE) \
+		--epochs $(MULTIMODAL_EPOCHS) \
+		--image-size $(MULTIMODAL_IMAGE_SIZE) \
+		--hidden-dim $(MULTIMODAL_HIDDEN_DIM) \
+		--output $(MULTIMODAL_OUTPUT)
+
+train-neurx-s-multimodal:
+	@echo "开始使用最新 S 版 neurx 预编译校验的多模态训练..."
+	LLM_MULTIMODAL=1 $(PYTHON) -m app.training.train_multimodal_neurx_s \
 		--data-source local \
 		--data-path $(MULTIMODAL_DATA_PATH) \
 		--batch-size $(MULTIMODAL_BATCH_SIZE) \

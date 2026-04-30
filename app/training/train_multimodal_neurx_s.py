@@ -30,11 +30,16 @@ def resolve_s_compiler(explicit_path: str | None) -> str:
             return str(compiler)
         raise FileNotFoundError(f"S compiler not executable: {compiler}")
 
-    candidates = sorted(glob.glob("/app/s/bin/s_*"))
+    candidates = []
+    for candidate in ("/usr/local/bin/s", "/app/s/bin/s"):
+        path = Path(candidate)
+        if path.exists() and os.access(path, os.X_OK):
+            candidates.append(str(path))
+    candidates.extend(sorted(glob.glob("/app/s/bin/s_*")))
     if not candidates:
-        raise FileNotFoundError("No S compiler found under /app/s/bin")
+        raise FileNotFoundError("No S compiler found under /app/s/bin or /usr/local/bin/s")
 
-    compiler = candidates[-1]
+    compiler = candidates[0]
     if not os.access(compiler, os.X_OK):
         raise PermissionError(f"S compiler not executable: {compiler}")
     return compiler
@@ -50,7 +55,7 @@ def compile_s_runtime(compiler: str, out_dir: str, source_files: list[str]) -> l
         if not src_path.exists():
             raise FileNotFoundError(f"Missing S runtime source: {src}")
         ir_path = out_path / f"{src_path.stem}.ir"
-        cmd = [compiler, str(src_path), str(ir_path)]
+        cmd = [compiler, "ir", str(src_path), "-o", str(ir_path)]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(

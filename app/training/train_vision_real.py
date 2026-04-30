@@ -257,6 +257,8 @@ def train_vision_real(args) -> None:
         },
         "runtime": {
             "s_compiler": getattr(args, "s_compiler", ""),
+            "s_runtime_mode": getattr(args, "s_runtime_mode", ""),
+            "s_runtime_source": getattr(args, "s_runtime_source", ""),
             "compiled_s_ir": getattr(args, "compiled_s_ir", []),
             "s_compile_error": getattr(args, "s_compile_error", ""),
         },

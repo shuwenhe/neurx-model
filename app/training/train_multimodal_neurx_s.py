@@ -3,78 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import glob
-import json
 import os
-import subprocess
-from pathlib import Path
 
 from app.training.train_vision_real import train_vision_real
-
-
-S_SOURCE_ROOT = "/app/neurx/s"
-
-
-def list_s_sources(root_dir: str) -> list[str]:
-    pattern = str(Path(root_dir).expanduser().resolve() / "*.s")
-    files = sorted(glob.glob(pattern))
-    if not files:
-        raise FileNotFoundError(f"No S sources found in: {root_dir}")
-    return files
-
-
-def resolve_s_compiler(explicit_path: str | None) -> str:
-    if explicit_path:
-        compiler = Path(explicit_path).expanduser().resolve()
-        if compiler.exists() and os.access(compiler, os.X_OK):
-            return str(compiler)
-        raise FileNotFoundError(f"S compiler not executable: {compiler}")
-
-    candidates = []
-    for candidate in ("/usr/local/bin/s", "/app/s/bin/s"):
-        path = Path(candidate)
-        if path.exists() and os.access(path, os.X_OK):
-            candidates.append(str(path))
-    candidates.extend(sorted(glob.glob("/app/s/bin/s_*")))
-    if not candidates:
-        raise FileNotFoundError("No S compiler found under /app/s/bin or /usr/local/bin/s")
-
-    compiler = candidates[0]
-    if not os.access(compiler, os.X_OK):
-        raise PermissionError(f"S compiler not executable: {compiler}")
-    return compiler
-
-
-def compile_s_runtime(compiler: str, out_dir: str, source_files: list[str]) -> list[str]:
-    out_path = Path(out_dir).expanduser().resolve()
-    out_path.mkdir(parents=True, exist_ok=True)
-
-    compiled = []
-    for src in source_files:
-        src_path = Path(src)
-        if not src_path.exists():
-            raise FileNotFoundError(f"Missing S runtime source: {src}")
-        ir_path = out_path / f"{src_path.stem}.ir"
-        cmd = [compiler, "ir", str(src_path), "-o", str(ir_path)]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(
-                "S runtime compile failed for "
-                f"{src_path}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-            )
-        compiled.append(str(ir_path))
-
-    manifest_path = out_path / "manifest.json"
-    manifest = {
-        "compiler": compiler,
-        "source_root": str(Path(S_SOURCE_ROOT).resolve()),
-        "sources": source_files,
-        "ir_files": compiled,
-    }
-    with manifest_path.open("w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=True, indent=2)
-
-    return compiled
+from app.training.s_runtime import (
+    DEFAULT_SOURCE_ROOT,
+    DEFAULT_SYSTEM_RUNTIME_ROOT,
+    prepare_s_runtime,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -107,8 +43,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--s-source-root",
         type=str,
-        default=S_SOURCE_ROOT,
+        default=DEFAULT_SOURCE_ROOT,
         help="Root directory of neurx S runtime sources",
+    )
+    parser.add_argument(
+        "--s-runtime-mode",
+        type=str,
+        default="auto",
+        choices=["auto", "system", "compile"],
+        help="Use system runtime, compile runtime, or auto-detect",
+    )
+    parser.add_argument(
+        "--s-runtime-root",
+        type=str,
+        default=os.environ.get("NEURX_S_OPS_RUNTIME", DEFAULT_SYSTEM_RUNTIME_ROOT),
+        help="System S runtime root (contains *.ir and manifest.json)",
     )
     parser.add_argument(
         "--allow-s-compile-fail",
@@ -122,35 +71,37 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    compiler = resolve_s_compiler(args.s_compiler or None)
-    source_files = list_s_sources(args.s_source_root)
-
-    compiled_ir = []
-    compile_error = ""
-    try:
-        compiled_ir = compile_s_runtime(compiler, args.s_ir_dir, source_files)
-    except Exception as exc:
-        compile_error = str(exc)
-        if not args.allow_s_compile_fail:
-            raise
+    runtime_result = prepare_s_runtime(
+        mode=args.s_runtime_mode,
+        system_runtime_root=args.s_runtime_root,
+        source_root=args.s_source_root,
+        compile_out_dir=args.s_ir_dir,
+        compiler_path=args.s_compiler,
+        allow_compile_fail=args.allow_s_compile_fail,
+    )
 
     print("=" * 70)
     print("NeurX Multimodal Training (S runtime preflight)")
     print("=" * 70)
-    print(f"s_compiler={compiler}")
-    if compile_error:
-        print("s_compile_status=failed")
-        print(compile_error)
+    print(f"s_runtime_mode={runtime_result.mode}")
+    print(f"s_runtime_source={runtime_result.runtime_source}")
+    print(f"s_runtime_destination={runtime_result.destination_root}")
+    print(f"s_compiler={runtime_result.compiler}")
+    if runtime_result.compile_error:
+        print("s_runtime_status=failed")
+        print(runtime_result.compile_error)
     else:
-        print("s_compile_status=ok")
-        print(f"compiled_ir={len(compiled_ir)} files")
-        for path in compiled_ir:
+        print("s_runtime_status=ok")
+        print(f"runtime_ir={len(runtime_result.ir_files)} files")
+        for path in runtime_result.ir_files:
             print(f"  - {path}")
 
     args.backend = "neurx_s_latest"
-    args.s_compiler = compiler
-    args.compiled_s_ir = compiled_ir
-    args.s_compile_error = compile_error
+    args.s_compiler = runtime_result.compiler
+    args.s_runtime_mode = runtime_result.mode
+    args.s_runtime_source = runtime_result.runtime_source
+    args.compiled_s_ir = runtime_result.ir_files
+    args.s_compile_error = runtime_result.compile_error
 
     train_vision_real(args)
 

@@ -1,5 +1,6 @@
 """GPT模型的core实现（纯numpy后端）"""
 import math
+import os
 import numpy as np
 from tensor.core.tensor import Tensor
 from tensor.core.nn import (
@@ -16,6 +17,98 @@ from tensor.core.nn import (
     ModuleDict,
     MoE,
 )
+
+
+_S_RUNTIME = None
+_S_RUNTIME_IMPORT_ERROR = None
+_S_RUNTIME_MODULES = ("gpt_model_ops", "ops")
+
+
+def _s_runtime_enabled():
+    mode = os.environ.get("NEURX_S_OPS_BACKEND", "auto").strip().lower()
+    return mode in {"1", "true", "on", "yes", "auto", "s"}
+
+
+def _load_s_runtime_fn():
+    global _S_RUNTIME, _S_RUNTIME_IMPORT_ERROR
+    if _S_RUNTIME is not None:
+        return _S_RUNTIME
+    if _S_RUNTIME_IMPORT_ERROR is not None:
+        return None
+    try:
+        import neurx.compile.runtime as runtime
+
+        _S_RUNTIME = runtime
+        return _S_RUNTIME
+    except Exception as exc:  # pragma: no cover - optional runtime integration
+        _S_RUNTIME_IMPORT_ERROR = exc
+        return None
+
+
+def _try_s_intrinsic(name, *args):
+    if not _s_runtime_enabled():
+        return None
+    runtime = _load_s_runtime_fn()
+    if runtime is None:
+        return None
+    for module_name in _S_RUNTIME_MODULES:
+        try:
+            if not runtime.supports_runtime_function(module_name, name):
+                continue
+            return runtime.invoke_runtime_function(module_name, name, *args)
+        except Exception:
+            continue
+    return None
+
+
+def _s_matmul(a, b):
+    out = _try_s_intrinsic("matmul", a, b)
+    if out is not None:
+        return out
+    return np.matmul(a, b)
+
+
+def _s_softmax(x, dim=-1):
+    out = _try_s_intrinsic("softmax", x, int(dim))
+    if out is not None:
+        return out
+    x_max = np.max(x, axis=dim, keepdims=True)
+    x_exp = np.exp(x - x_max)
+    return x_exp / (np.sum(x_exp, axis=dim, keepdims=True) + 1e-12)
+
+
+def _s_silu(x):
+    out = _try_s_intrinsic("silu", x)
+    if out is not None:
+        return out
+    return None
+
+
+def _s_gelu(x, approximate=False):
+    out = _try_s_intrinsic("gelu", x, bool(approximate))
+    if out is not None:
+        return out
+    return None
+
+
+def _s_activation_tensor(tensor, intrinsic_name, fallback_fn, *intrinsic_args):
+    if intrinsic_name == "silu":
+        out = _s_silu(tensor.data)
+    elif intrinsic_name == "gelu":
+        approximate = bool(intrinsic_args[0]) if intrinsic_args else False
+        out = _s_gelu(tensor.data, approximate=approximate)
+    else:
+        out = None
+
+    if out is None:
+        return fallback_fn(tensor)
+
+    return Tensor(
+        out,
+        requires_grad=tensor.requires_grad,
+        _children=(tensor,),
+        _op=f"{intrinsic_name}_s",
+    )
 
 
 def _rope_cache(seq_len, dim, theta=10000.0, start_pos=0):
@@ -104,7 +197,7 @@ class CausalSelfAttention(Module):
         
         # 注意力计算（scaled dot-product attention）
         scale = 1.0 / math.sqrt(head_dim)
-        att = np.matmul(q_data, k_data.transpose(0, 1, 3, 2)) * scale  # (B, nh, T, T)
+        att = _s_matmul(q_data, k_data.transpose(0, 1, 3, 2)) * scale  # (B, nh, T, T)
         
         # 应用因果mask
         total_T = k_data.shape[2]
@@ -113,9 +206,7 @@ class CausalSelfAttention(Module):
         att = np.where(mask[None, None, :, :] == 0, -1e10, att)
         
         # Softmax
-        att_max = att.max(axis=-1, keepdims=True)
-        att_exp = np.exp(att - att_max)
-        att_probs = att_exp / (att_exp.sum(axis=-1, keepdims=True) + 1e-12)
+        att_probs = _s_softmax(att, dim=-1)
         
         # Dropout (简化：直接在numpy上操作)
         if self.training and self.dropout > 0:
@@ -123,7 +214,7 @@ class CausalSelfAttention(Module):
             att_probs = att_probs * dropout_mask
         
         # 应用注意力权重
-        y_data = np.matmul(att_probs, v_data)  # (B, nh, T, hs)
+        y_data = _s_matmul(att_probs, v_data)  # (B, nh, T, hs)
         
         # 重新组合所有头的输出
         y_data = y_data.transpose(0, 2, 1, 3).reshape(B, T, C)
@@ -157,11 +248,12 @@ class MLP(Module):
         if self.use_swiglu:
             gate = self.w1(x)
             value = self.w2(x)
-            x = self.act(gate) * value
+            gate_act = _s_activation_tensor(gate, "silu", self.act)
+            x = gate_act * value
             x = self.w3(x)
         else:
             x = self.c_fc(x)
-            x = self.gelu(x)
+            x = _s_activation_tensor(x, "gelu", self.gelu, False)
             x = self.c_proj(x)
         x = self.dropout(x)
         return x

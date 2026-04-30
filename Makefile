@@ -1,4 +1,6 @@
-.PHONY: help install test step1 step2 step3 bootstrap-check train train-basic train-core train-multimodal train-neurx-s-multimodal train-chinese train-neurx-dataset train-flow serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services
+.PHONY: help install test step1 step2 step3 bootstrap-check ensure-neurx-framework train train-basic train-core train-multimodal train-neurx-s-multimodal train-chinese train-neurx-dataset train-flow serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services
+
+.DEFAULT_GOAL := train
 
 # Python解释器（优先使用项目内虚拟环境）
 PYTHON := $(shell if [ -x ./venv/bin/python ]; then echo ./venv/bin/python; else echo python3; fi)
@@ -191,8 +193,17 @@ bootstrap-check:
 	$(MAKE) step3
 	@echo "✓ bootstrap-check 全部通过"
 
+ensure-neurx-framework:
+	@if $(PYTHON) -c "import neurx" >/dev/null 2>&1; then \
+		echo "✓ 检测到 neurx 框架（$(PYTHON)）"; \
+	else \
+		echo "未检测到 neurx，开始编译并安装 /app/neurx ..."; \
+		$(MAKE) -C /app/neurx PYTHON="$(PYTHON)" install-local; \
+		$(PYTHON) -c "import neurx" >/dev/null 2>&1 || { echo "❌ neurx 安装后仍不可用"; exit 1; }; \
+	fi
+
 # 训练模型（默认：中文文本训练）
-train:
+train: ensure-neurx-framework
 	@echo "开始训练模型..."
 	@echo "使用中文文本训练（推荐）"
 	@echo "其他选项: make train-multimodal, make train-basic"
@@ -204,12 +215,12 @@ train-basic:
 	@echo "开始基础文本训练..."
 	$(PYTHON) -m app.training.train
 
-train-core:
+train-core: ensure-neurx-framework
 	@echo "开始自研后端训练..."
 	$(PYTHON) -m app.training.train_core
 
 # 多模态训练
-train-multimodal:
+train-multimodal: ensure-neurx-framework
 	@echo "开始多模态训练模型..."
 	LLM_MULTIMODAL=1 $(PYTHON) -m app.training.train_vision_real \
 		--data-source local \
@@ -220,7 +231,7 @@ train-multimodal:
 		--hidden-dim $(MULTIMODAL_HIDDEN_DIM) \
 		--output $(MULTIMODAL_OUTPUT)
 
-train-neurx-s-multimodal:
+train-neurx-s-multimodal: ensure-neurx-framework
 	@echo "开始使用最新 S 版 neurx 预编译校验的多模态训练..."
 	LLM_MULTIMODAL=1 $(PYTHON) -m app.training.train_multimodal_neurx_s \
 		--data-source local \
@@ -237,7 +248,7 @@ train-neurx-s-multimodal:
 #   make train-chinese
 #   make train-chinese CHINESE_DATA_SOURCE=zhwiki CHINESE_EPOCHS=5
 #   make train-chinese CHINESE_DATA_SOURCE=baidubaike CHINESE_BATCH_SIZE=16
-train-chinese:
+train-chinese: ensure-neurx-framework
 	@echo "开始训练中文文本能力..."
 	@echo "batch_size=$(CHINESE_BATCH_SIZE), epochs=$(CHINESE_EPOCHS), lr=$(CHINESE_LR)"
 	$(PYTHON) -m app.training.train_simple_neurx \
@@ -248,7 +259,7 @@ train-chinese:
 		--output $(CHINESE_OUTPUT)
 
 # NeurX 框架训练（推荐）
-train-neurx:
+train-neurx: ensure-neurx-framework
 	@echo "开始使用 NeurX 框架训练..."
 	@echo "batch_size=4, epochs=3, lr=1e-4"
 	$(PYTHON) -m app.training.train_simple_neurx \
@@ -258,7 +269,7 @@ train-neurx:
 		--hidden-dim 256 \
 		--num-layers 2
 
-train-neurx-dataset:
+train-neurx-dataset: ensure-neurx-framework
 	@echo "使用 dataset 目录语料训练 NeurX 模型..."
 	$(PYTHON) -m app.training.train_neurx \
 		--model-size tiny \

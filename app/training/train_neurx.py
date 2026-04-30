@@ -11,7 +11,7 @@
 import argparse
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import numpy as np
 
 import neurx
@@ -31,7 +31,8 @@ def build_timestamped_save_path(save_path):
     if not save_path:
         return save_path
 
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    tz_utc8 = timezone(timedelta(hours=8))
+    timestamp = datetime.now(tz_utc8).strftime("%Y%m%d%H%M%S")
     base, ext = os.path.splitext(save_path)
     if not ext:
         ext = ".pkl"

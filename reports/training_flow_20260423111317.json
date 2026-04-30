@@ -1,0 +1,12 @@
+{
+  "run_ts_utc8": "20260423111317",
+  "dataset_file": "dataset/text/neurx_train_mix_v1.txt",
+  "model_size": "tiny",
+  "epochs": 1,
+  "batch_size": 8,
+  "seq_len": 64,
+  "learning_rate": "1e-4",
+  "steps_per_epoch": 50,
+  "checkpoint": "checkpoints/model_neurx_dataset20260423111323.pkl",
+  "latest_alias": "checkpoints/model_neurx_dataset_latest.pkl"
+}

@@ -1,0 +1,36 @@
+{
+  "compiler": "/usr/local/bin/s",
+  "source_root": "/app/neurx/s",
+  "sources": [
+    "/app/neurx/s/autograd.s",
+    "/app/neurx/s/checkpoint.s",
+    "/app/neurx/s/dataloader_mvp.s",
+    "/app/neurx/s/empty.s",
+    "/app/neurx/s/main.s",
+    "/app/neurx/s/multimodal.s",
+    "/app/neurx/s/nn.s",
+    "/app/neurx/s/ops.s",
+    "/app/neurx/s/optim_mvp.s",
+    "/app/neurx/s/s_write_test.s",
+    "/app/neurx/s/schedule.s",
+    "/app/neurx/s/simple.s",
+    "/app/neurx/s/tensor.s",
+    "/app/neurx/s/transformer.s"
+  ],
+  "ir_files": [
+    "/app/neurx-model/reports/s_ir_refactor/autograd.ir",
+    "/app/neurx-model/reports/s_ir_refactor/checkpoint.ir",
+    "/app/neurx-model/reports/s_ir_refactor/dataloader_mvp.ir",
+    "/app/neurx-model/reports/s_ir_refactor/empty.ir",
+    "/app/neurx-model/reports/s_ir_refactor/main.ir",
+    "/app/neurx-model/reports/s_ir_refactor/multimodal.ir",
+    "/app/neurx-model/reports/s_ir_refactor/nn.ir",
+    "/app/neurx-model/reports/s_ir_refactor/ops.ir",
+    "/app/neurx-model/reports/s_ir_refactor/optim_mvp.ir",
+    "/app/neurx-model/reports/s_ir_refactor/s_write_test.ir",
+    "/app/neurx-model/reports/s_ir_refactor/schedule.ir",
+    "/app/neurx-model/reports/s_ir_refactor/simple.ir",
+    "/app/neurx-model/reports/s_ir_refactor/tensor.ir",
+    "/app/neurx-model/reports/s_ir_refactor/transformer.ir"
+  ]
+}

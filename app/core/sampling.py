@@ -90,6 +90,38 @@ def sample_next_token(
     cfg.validate()
     logits = np.asarray(raw_logits, dtype=np.float64)
 
+    top_k_value = -1 if cfg.top_k is None else int(cfg.top_k)
+    token_arr = np.asarray(token_ids, dtype=np.int64)
+    try:
+        from neurx.compile.runtime import try_invoke_ops_function
+
+        if cfg.temperature == 0:
+            next_id = try_invoke_ops_function(
+                "generation_step",
+                logits,
+                token_arr,
+                float(cfg.temperature),
+                top_k_value,
+                float(cfg.top_p),
+                float(cfg.repetition_penalty),
+            )
+            if next_id is not None:
+                return int(next_id)
+        filtered = try_invoke_ops_function(
+            "sampling_top_k_top_p",
+            logits,
+            token_arr,
+            float(cfg.temperature),
+            top_k_value,
+            float(cfg.top_p),
+            float(cfg.repetition_penalty),
+        )
+    except Exception:
+        filtered = None
+    if filtered is not None:
+        probs = _softmax(np.asarray(filtered, dtype=np.float64))
+        return int(rng.choice(len(probs), p=probs))
+
     logits = _apply_repetition_penalty(logits, token_ids, cfg.repetition_penalty)
     logits = _apply_top_k(logits, cfg.top_k)
     logits = _apply_top_p(logits, cfg.top_p)

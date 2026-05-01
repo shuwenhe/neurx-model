@@ -15,7 +15,8 @@
     "/app/neurx/s/schedule.s",
     "/app/neurx/s/simple.s",
     "/app/neurx/s/tensor.s",
-    "/app/neurx/s/transformer.s"
+    "/app/neurx/s/transformer.s",
+    "/app/neurx-model/s/gpt_model_ops.s"
   ],
   "ir_files": [
     "/app/neurx-model/reports/s_ir/autograd.ir",
@@ -31,6 +32,7 @@
     "/app/neurx-model/reports/s_ir/schedule.ir",
     "/app/neurx-model/reports/s_ir/simple.ir",
     "/app/neurx-model/reports/s_ir/tensor.ir",
-    "/app/neurx-model/reports/s_ir/transformer.ir"
+    "/app/neurx-model/reports/s_ir/transformer.ir",
+    "/app/neurx-model/reports/s_ir/gpt_model_ops.ir"
   ]
 }

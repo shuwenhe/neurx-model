@@ -11,6 +11,7 @@ import numpy as np
 import neurx
 import neurx.nn as nn
 
+from app.core.sampling import SamplingConfig, sample_next_token
 from app.core.models_neurx import (
     create_chatmodel_tiny,
     create_chatmodel_small,
@@ -88,6 +89,20 @@ class ChatModelInference:
         self.model.eval()
         
         print(f"Created fresh {self.model_size} model")
+
+    @staticmethod
+    def _tensor(values, dtype='int64'):
+        data = np.asarray(values, dtype=np.int64 if dtype == 'int64' else None)
+        if hasattr(neurx, 'array'):
+            return neurx.array(data, dtype=dtype)
+        return neurx.Tensor(data)
+
+    @staticmethod
+    def _cat(tensors):
+        if hasattr(neurx, 'cat'):
+            return neurx.cat(tensors)
+        arrays = [ChatModelInference._to_numpy(tensor) for tensor in tensors]
+        return ChatModelInference._tensor(np.concatenate(arrays), dtype='int64')
     
     def encode_text(self, text):
         """将文本编码为 token IDs
@@ -105,7 +120,7 @@ class ChatModelInference:
             else:
                 # 未知字符映射到特殊 token
                 token_ids.append(0)
-        return neurx.array(token_ids, dtype='int64')
+        return self._tensor(token_ids, dtype='int64')
     
     def decode_tokens(self, token_ids):
         """将 token IDs 解码为文本
@@ -131,6 +146,14 @@ class ChatModelInference:
                 text += self.id_to_char[token_id]
         
         return text
+
+    @staticmethod
+    def _to_numpy(value):
+        if hasattr(value, "to_numpy"):
+            return value.to_numpy()
+        if hasattr(value, "data"):
+            return np.asarray(value.data)
+        return np.asarray(value)
     
     def generate(self, prompt, max_length=100, temperature=1.0, top_k=None, top_p=0.9):
         """生成文本
@@ -145,8 +168,18 @@ class ChatModelInference:
         Returns:
             生成的文本
         """
+        sampling_cfg = SamplingConfig(
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=1.0,
+        )
+        sampling_cfg.validate()
+        rng = np.random.default_rng(None)
+
         # 编码 prompt
         token_ids = self.encode_text(prompt)
+        generated_ids = [int(token_id) for token_id in self._to_numpy(token_ids).reshape(-1)]
         
         print(f"\n生成过程:")
         print(f"Prompt: {prompt}")
@@ -155,7 +188,7 @@ class ChatModelInference:
         with neurx.no_grad():
             for i in range(max_length):
                 # 获取当前序列的最后 1024 个 token（模型的 max_seq_len）
-                current_tokens = token_ids[-1024:] if len(token_ids) > 1024 else token_ids
+                current_tokens = self._tensor(generated_ids[-1024:], dtype='int64')
                 
                 # 前向传播
                 input_ids = current_tokens.unsqueeze(0)  # (1, T)
@@ -164,42 +197,17 @@ class ChatModelInference:
                 
                 # 获取最后一个 token 的 logits
                 next_logits = logits[0, -1, :]  # (V,)
-                
-                # 应用温度
-                if temperature != 1.0:
-                    next_logits = next_logits / temperature
-                
-                # 计算概率
-                probs = neurx.softmax(next_logits, dim=-1)
-                
-                # Top-k 采样
-                if top_k is not None:
-                    top_k_probs, top_k_indices = neurx.topk(probs, k=top_k)
-                    next_token_id = neurx.multinomial(top_k_probs, 1).item()
-                    next_token_id = top_k_indices[next_token_id].item()
-                
-                # Top-p 采样
-                elif top_p < 1.0:
-                    sorted_probs, sorted_indices = neurx.sort(probs, descending=True)
-                    cumsum_probs = neurx.cumsum(sorted_probs, dim=0)
-                    
-                    # 找到 cumulative probability > top_p 的位置
-                    mask = cumsum_probs <= top_p
-                    valid_probs = sorted_probs[mask]
-                    valid_indices = sorted_indices[mask]
-                    
-                    # 正则化概率
-                    valid_probs = valid_probs / valid_probs.sum()
-                    
-                    next_token_id = neurx.multinomial(valid_probs, 1).item()
-                    next_token_id = valid_indices[next_token_id].item()
-                
-                # 贪心采样（概率最高的 token）
-                else:
-                    next_token_id = probs.argmax(dim=-1).item()
+
+                next_token_id = sample_next_token(
+                    self._to_numpy(next_logits),
+                    token_ids=generated_ids,
+                    cfg=sampling_cfg,
+                    rng=rng,
+                )
                 
                 # 添加到序列
-                token_ids = neurx.cat([token_ids, neurx.array([next_token_id], dtype='int64')])
+                token_ids = self._cat([token_ids, self._tensor([next_token_id], dtype='int64')])
+                generated_ids.append(next_token_id)
                 
                 # 打印生成进度
                 next_char = self.id_to_char.get(next_token_id, '?')
@@ -208,7 +216,7 @@ class ChatModelInference:
         print("\n" + "-" * 50 + "\n")
         
         # 解码完整输出
-        full_text = self.decode_tokens(token_ids)
+        full_text = self.decode_tokens(generated_ids)
         return full_text
     
     def predict_next_tokens(self, prompt, num_predictions=5):

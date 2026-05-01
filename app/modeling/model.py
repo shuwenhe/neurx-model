@@ -6,7 +6,10 @@ from app.core.gpt_model import (
     CausalSelfAttention,
     MLP,
 )
-from tensor.core.nn import LayerNorm, GELU, Dropout, MoE
+try:
+    from neurx.nn import LayerNorm, GELU, Dropout, MoE
+except ImportError:
+    from tensor.core.nn import LayerNorm, GELU, Dropout, MoE
 from app.modeling.config import ModelConfig
 
 # 导出给外部使用

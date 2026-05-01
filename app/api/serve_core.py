@@ -39,26 +39,68 @@ class SimpleFFNCheckpointModel:
         self.vocab_size = int(self.tok_emb.shape[0])
         self.hidden_dim = int(self.tok_emb.shape[1])
         self.max_seq_len = int(seq_len) if seq_len else None
+        self._runtime_backend = "python"
 
     @staticmethod
-    def _layer_norm(x: np.ndarray, eps: float = 1e-5) -> np.ndarray:
+    def _try_s(name: str, *args):
+        try:
+            from neurx.compile.runtime import try_invoke_ops_function
+
+            return try_invoke_ops_function(name, *args)
+        except Exception:
+            return None
+
+    def _layer_norm(self, x: np.ndarray, eps: float = 1e-5) -> np.ndarray:
+        out = self._try_s(
+            "layer_norm",
+            x,
+            np.ones((x.shape[-1],), dtype=x.dtype),
+            np.zeros((x.shape[-1],), dtype=x.dtype),
+            1,
+            eps,
+        )
+        if out is not None:
+            self._runtime_backend = "s"
+            return out
         mean = x.mean(axis=-1, keepdims=True)
         var = ((x - mean) ** 2).mean(axis=-1, keepdims=True)
         return (x - mean) / np.sqrt(var + eps)
 
+    def _linear(self, x: np.ndarray, weight: np.ndarray, bias: np.ndarray) -> np.ndarray:
+        out = self._try_s("linear", x, weight, bias)
+        if out is not None:
+            self._runtime_backend = "s"
+            return out
+        return x @ weight + bias
+
+    def _relu(self, x: np.ndarray) -> np.ndarray:
+        out = self._try_s("relu", x)
+        if out is not None:
+            self._runtime_backend = "s"
+            return out
+        return np.maximum(x, 0.0)
+
+    def _lm_head(self, x: np.ndarray) -> np.ndarray:
+        out = self._try_s("lm_head_logits", x, self.out_w, self.out_b)
+        if out is not None:
+            self._runtime_backend = "s"
+            return out
+        return x @ self.out_w + self.out_b
+
     def __call__(self, input_ids, targets=None):
+        self._runtime_backend = "python"
         input_ids = np.asarray(input_ids, dtype=np.int64)
         x = self.tok_emb[input_ids]  # (B, T, H)
 
         residual = x
         x = self._layer_norm(x)
-        x = x @ self.fc1_w + self.fc1_b
-        x = np.maximum(x, 0.0)
-        x = x @ self.fc2_w + self.fc2_b
+        x = self._linear(x, self.fc1_w, self.fc1_b)
+        x = self._relu(x)
+        x = self._linear(x, self.fc2_w, self.fc2_b)
         x = x + residual
 
         x = self._layer_norm(x)
-        logits = x @ self.out_w + self.out_b  # (B, T, V)
+        logits = self._lm_head(x)  # (B, T, V)
         return logits
 
 
@@ -312,17 +354,50 @@ def _generate_ids(
     sampling_cfg: SamplingConfig,
     stop_sequences: list[str],
 ) -> tuple[list[int], str]:
-    rng = np.random.default_rng(sampling_cfg.seed)
     ids = initial_ids[:]
-    max_ctx = getattr(state.model, "max_seq_len", None)
-    generated_text = ""
     unk_id = state.tokenizer.stoi.get("<unk>", None) if hasattr(state.tokenizer, "stoi") else None
 
+    can_use_model_generate = (
+        hasattr(state.model, "generate")
+        and not stop_sequences
+        and unk_id is None
+    )
+    if can_use_model_generate:
+        generated = state.model.generate(
+            ids,
+            max_new_tokens=max_new_tokens,
+            temperature=sampling_cfg.temperature,
+            top_k=sampling_cfg.top_k,
+            top_p=sampling_cfg.top_p,
+            repetition_penalty=sampling_cfg.repetition_penalty,
+            seed=sampling_cfg.seed,
+            use_kv_cache=True,
+        )
+        ids = generated if isinstance(generated, list) else generated[0].tolist()
+        return ids, state.tokenizer.decode(ids).replace("<unk>", "")
+
+    rng = np.random.default_rng(sampling_cfg.seed)
+    max_ctx = getattr(state.model, "max_seq_len", None)
+    generated_text = ""
+    kv_cache = None
+
     for _ in range(max_new_tokens):
-        ctx = ids[-max_ctx:] if isinstance(max_ctx, int) and max_ctx > 0 else ids
-        x = np.array([ctx], dtype=np.int64)
-        model_output = state.model(x, None)
-        logits = _extract_logits(model_output)
+        if hasattr(state.model, "forward_with_cache"):
+            if kv_cache is None:
+                ctx = ids[-max_ctx:] if isinstance(max_ctx, int) and max_ctx > 0 else ids
+                x = np.array([ctx], dtype=np.int64)
+            else:
+                x = np.array([[ids[-1]]], dtype=np.int64)
+            model_output = state.model.forward_with_cache(x, kv_cache=kv_cache)
+            if isinstance(model_output, tuple) and len(model_output) == 2:
+                logits, kv_cache = model_output
+            else:
+                logits = _extract_logits(model_output)
+        else:
+            ctx = ids[-max_ctx:] if isinstance(max_ctx, int) and max_ctx > 0 else ids
+            x = np.array([ctx], dtype=np.int64)
+            model_output = state.model(x, None)
+            logits = _extract_logits(model_output)
         logits_np = _to_numpy(logits)
         if unk_id is not None and 0 <= unk_id < logits_np.shape[-1]:
             logits_np[0, -1, unk_id] = -np.inf

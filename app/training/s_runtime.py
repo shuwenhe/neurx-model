@@ -12,6 +12,7 @@ from pathlib import Path
 
 DEFAULT_SYSTEM_RUNTIME_ROOT = "/usr/local/share/neurx_s_runtime"
 DEFAULT_SOURCE_ROOT = "/app/neurx/s"
+DEFAULT_MODEL_SOURCE_ROOT = "/app/neurx-model/s"
 
 
 @dataclass
@@ -35,6 +36,22 @@ def list_s_sources(root_dir: str) -> list[str]:
     files = sorted(glob.glob(pattern))
     if not files:
         raise FileNotFoundError(f"No S sources found in: {root_dir}")
+    return files
+
+
+def list_s_sources_from_roots(root_dirs: list[str]) -> list[str]:
+    files: list[str] = []
+    seen: set[str] = set()
+    for root_dir in root_dirs:
+        root_dir = (root_dir or "").strip()
+        if not root_dir:
+            continue
+        for src in list_s_sources(root_dir):
+            if src not in seen:
+                files.append(src)
+                seen.add(src)
+    if not files:
+        raise FileNotFoundError(f"No S sources found in: {root_dirs}")
     return files
 
 
@@ -76,7 +93,7 @@ def _compile_runtime(compiler: str, out_dir: Path, source_files: list[str], sour
         if not src_path.exists():
             raise FileNotFoundError(f"Missing S runtime source: {src}")
         ir_path = out_dir / f"{src_path.stem}.ir"
-        cmd = [compiler, "ir", str(src_path), "-o", str(ir_path)]
+        cmd = [compiler, str(src_path), str(ir_path)]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(
@@ -120,6 +137,7 @@ def prepare_s_runtime(
     mode: str,
     system_runtime_root: str,
     source_root: str,
+    model_source_root: str,
     compile_out_dir: str,
     compiler_path: str,
     allow_compile_fail: bool,
@@ -152,7 +170,7 @@ def prepare_s_runtime(
 
     compiler = resolve_s_compiler(compiler_path or None)
     try:
-        source_files = list_s_sources(source_root)
+        source_files = list_s_sources_from_roots([source_root, model_source_root])
         _compile_runtime(compiler, compile_out_root, source_files, source_root)
         copied = _sync_runtime(compile_out_root, destination_root)
         runtime_source = str(compile_out_root)

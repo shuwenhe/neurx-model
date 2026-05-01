@@ -7,6 +7,7 @@ import os
 
 from app.training.train_vision_real import train_vision_real
 from app.training.s_runtime import (
+    DEFAULT_MODEL_SOURCE_ROOT,
     DEFAULT_SOURCE_ROOT,
     DEFAULT_SYSTEM_RUNTIME_ROOT,
     prepare_s_runtime,
@@ -47,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Root directory of neurx S runtime sources",
     )
     parser.add_argument(
+        "--s-model-source-root",
+        type=str,
+        default=DEFAULT_MODEL_SOURCE_ROOT,
+        help="Root directory of neurx-model S runtime sources",
+    )
+    parser.add_argument(
         "--s-runtime-mode",
         type=str,
         default="auto",
@@ -75,6 +82,7 @@ def main() -> None:
         mode=args.s_runtime_mode,
         system_runtime_root=args.s_runtime_root,
         source_root=args.s_source_root,
+        model_source_root=args.s_model_source_root,
         compile_out_dir=args.s_ir_dir,
         compiler_path=args.s_compiler,
         allow_compile_fail=args.allow_s_compile_fail,

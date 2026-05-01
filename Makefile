@@ -22,6 +22,21 @@ VISION_CHECKPOINT ?= $(CORE_MODEL_CHECKPOINT)
 VISION_OUTPUT ?= $(CORE_MODEL_CHECKPOINT)
 S_COMPILE_ALLOW_FAIL ?= 1
 
+# 多模态训练参数（默认使用仓库内迷你图文数据，便于验证 S runtime 闭环）
+MULTIMODAL_DATA_PATH ?= tmp/minivl_data
+MULTIMODAL_BATCH_SIZE ?= 2
+MULTIMODAL_EPOCHS ?= 1
+MULTIMODAL_IMAGE_SIZE ?= 32
+MULTIMODAL_HIDDEN_DIM ?= 128
+MULTIMODAL_OUTPUT ?= checkpoints/model_neurx_s_multimodal.pkl
+
+# S runtime 参数
+S_COMPILER ?= /usr/local/bin/s
+S_RUNTIME_MODE ?= compile
+S_SOURCE_ROOT ?= /app/neurx/s
+S_MODEL_SOURCE_ROOT ?= /app/neurx-model/s
+S_IR_DIR ?= reports/s_ir
+
 # 中文文本训练参数（可在命令行覆盖）
 CHINESE_DATA_SOURCE ?= wikitext_zh
 CHINESE_BATCH_SIZE ?= 4
@@ -241,6 +256,11 @@ train-neurx-s-multimodal: ensure-neurx-framework
 		--image-size $(MULTIMODAL_IMAGE_SIZE) \
 		--hidden-dim $(MULTIMODAL_HIDDEN_DIM) \
 		--output $(MULTIMODAL_OUTPUT) \
+		--s-runtime-mode $(S_RUNTIME_MODE) \
+		--s-compiler $(S_COMPILER) \
+		--s-source-root $(S_SOURCE_ROOT) \
+		--s-model-source-root $(S_MODEL_SOURCE_ROOT) \
+		--s-ir-dir $(S_IR_DIR) \
 		$$( [ "$(S_COMPILE_ALLOW_FAIL)" = "1" ] && echo "--allow-s-compile-fail" )
 
 # 中文文本训练（支持参数覆盖）

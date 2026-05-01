@@ -2,21 +2,44 @@
 import math
 import os
 import numpy as np
-from tensor.core.tensor import Tensor
-from tensor.core.nn import (
-    Module,
-    Parameter,
-    Embedding,
-    Linear,
-    LayerNorm,
-    RMSNorm,
-    Dropout,
-    GELU,
-    SiLU,
-    ModuleList,
-    ModuleDict,
-    MoE,
-)
+try:
+    from neurx import Tensor
+    from neurx.nn import (
+        Module,
+        Parameter,
+        Embedding,
+        Linear,
+        LayerNorm as _NeurXLayerNorm,
+        RMSNorm,
+        Dropout,
+        GELU,
+        SiLU,
+        ModuleList,
+        ModuleDict,
+        MoE,
+    )
+    from neurx.losses import cross_entropy_loss
+
+    class LayerNorm(_NeurXLayerNorm):
+        def __init__(self, normalized_shape, bias=True, eps=1e-5):
+            super().__init__(normalized_shape, eps=eps, elementwise_affine=bool(bias))
+except ImportError:
+    from tensor.core.tensor import Tensor
+    from tensor.core.nn import (
+        Module,
+        Parameter,
+        Embedding,
+        Linear,
+        LayerNorm,
+        RMSNorm,
+        Dropout,
+        GELU,
+        SiLU,
+        ModuleList,
+        ModuleDict,
+        MoE,
+    )
+    from tensor.core.losses import cross_entropy_loss
 
 
 _S_RUNTIME = None
@@ -109,6 +132,24 @@ def _s_activation_tensor(tensor, intrinsic_name, fallback_fn, *intrinsic_args):
         _children=(tensor,),
         _op=f"{intrinsic_name}_s",
     )
+
+
+def _s_lm_head_tensor(hidden, lm_head):
+    weight = getattr(lm_head, "weight", None)
+    if weight is None:
+        return None
+    weight_data = weight.data if hasattr(weight, "data") else weight
+    bias = getattr(lm_head, "bias", None)
+    if bias is None:
+        bias_data = np.zeros((weight_data.shape[-1],), dtype=np.asarray(weight_data).dtype)
+    else:
+        bias_data = bias.data if hasattr(bias, "data") else bias
+    out = _try_s_intrinsic("lm_head_logits", hidden.data, weight_data, bias_data)
+    if out is None:
+        return None
+    result = Tensor(out, requires_grad=hidden.requires_grad, _children=(hidden,), _op="lm_head_logits_s")
+    result._runtime_backend = "s"
+    return result
 
 
 def _rope_cache(seq_len, dim, theta=10000.0, start_pos=0):
@@ -365,13 +406,14 @@ class GPT(Module):
             # 训练模式：计算所有位置的logits和损失
             logits = self.lm_head(x)
             # 计算交叉熵损失
-            from tensor.core.losses import cross_entropy_loss
             loss = cross_entropy_loss(logits, Tensor(targets))
         else:
             # 推理模式：只计算最后一个token的logits
             # 取最后一个时间步
             x_last = Tensor(x.data[:, -1:, :], requires_grad=x.requires_grad, _children=(x,), _op="slice")
-            logits = self.lm_head(x_last)
+            logits = _s_lm_head_tensor(x_last, self.lm_head)
+            if logits is None:
+                logits = self.lm_head(x_last)
             loss = None
         
         return logits, loss
@@ -488,7 +530,9 @@ class GPT(Module):
             new_cache.append(updated)
 
         x = self.ln_f(x)
-        logits = self.lm_head(x)
+        logits = _s_lm_head_tensor(x, self.lm_head)
+        if logits is None:
+            logits = self.lm_head(x)
         return logits, new_cache
 
 

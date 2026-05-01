@@ -1,5 +1,34 @@
-from tensor.core.nn import Module, Embedding, Linear, LayerNorm, RMSNorm, TransformerBlock
-from tensor.core.losses import cross_entropy
+try:
+    from neurx.nn import Module, Embedding, Linear, LayerNorm, RMSNorm, TransformerBlock
+    from neurx.losses import cross_entropy
+except ImportError:
+    from tensor.core.nn import Module, Embedding, Linear, LayerNorm, RMSNorm, TransformerBlock
+    from tensor.core.losses import cross_entropy
+
+
+def _try_s_lm_head(hidden, lm_head):
+    try:
+        from neurx.compile.runtime import try_invoke_ops_function
+
+        weight = getattr(lm_head, "weight", None)
+        if weight is None:
+            return None
+        weight_data = weight.data if hasattr(weight, "data") else weight
+        bias = getattr(lm_head, "bias", None)
+        if bias is None:
+            import numpy as np
+
+            bias_data = np.zeros((weight_data.shape[-1],), dtype=weight_data.dtype)
+        else:
+            bias_data = bias.data if hasattr(bias, "data") else bias
+        out = try_invoke_ops_function("lm_head_logits", hidden.data, weight_data, bias_data)
+        if out is None:
+            return None
+        result = hidden.__class__(out, requires_grad=hidden.requires_grad, _children=(hidden,), _op="lm_head_logits_s")
+        result._runtime_backend = "s"
+        return result
+    except Exception:
+        return None
 
 
 class TinyLM(Module):
@@ -13,7 +42,9 @@ class TinyLM(Module):
 
     def __call__(self, input_ids, targets=None):
         x = self.tok_emb(input_ids)          # (B, T, C)
-        logits = self.lm_head(x)             # (B, T, V)
+        logits = self.lm_head(x) if targets is not None else _try_s_lm_head(x, self.lm_head)
+        if logits is None:
+            logits = self.lm_head(x)             # (B, T, V)
         loss = None
         if targets is not None:
             loss = cross_entropy(logits, targets)
@@ -90,7 +121,9 @@ class TransformerLM(Module):
         
         # 最终归一化和输出
         x = self.ln_f(x)
-        logits = self.lm_head(x)  # (B, T, V)
+        logits = self.lm_head(x) if targets is not None else _try_s_lm_head(x, self.lm_head)
+        if logits is None:
+            logits = self.lm_head(x)  # (B, T, V)
         
         loss = None
         if targets is not None:
@@ -123,7 +156,9 @@ class TransformerLM(Module):
             new_cache.append(updated)
 
         x = self.ln_f(x)
-        logits = self.lm_head(x)
+        logits = _try_s_lm_head(x, self.lm_head)
+        if logits is None:
+            logits = self.lm_head(x)
         return logits, new_cache
 
     def generate(

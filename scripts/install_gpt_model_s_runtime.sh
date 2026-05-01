@@ -18,7 +18,7 @@ fi
 
 mkdir -p "$RUNTIME_ROOT"
 
-"$S_COMPILER" ir "$SRC" -o "$OUT_IR"
+"$S_COMPILER" "$SRC" "$OUT_IR"
 
 python3 - <<'PY'
 from pathlib import Path

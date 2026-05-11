@@ -1,5 +1,6 @@
 import sys
 import os
+import warnings
 try:
     # Try to import from neurx framework (recommended)
     from neurx import Tensor
@@ -14,10 +15,25 @@ except ImportError:
         from tensor.core.optim import AdamW
         from tensor.core.losses import cross_entropy
     except ImportError:
-        raise ImportError(
-            "Neither 'neurx' nor 'tensor' module found. "
-            "Please install NeurX: pip install /home/shuwen/neurx"
+        warnings.warn(
+            "Neither 'neurx' nor 'tensor' Python symbols are fully available; "
+            "falling back to limited core mode.",
+            RuntimeWarning,
         )
+
+        class _Unavailable:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("core backend symbols unavailable in current runtime")
+
+        Tensor = _Unavailable
+        Module = _Unavailable
+        Parameter = _Unavailable
+        Embedding = _Unavailable
+        Linear = _Unavailable
+        AdamW = _Unavailable
+
+        def cross_entropy(*args, **kwargs):
+            raise RuntimeError("core backend symbols unavailable in current runtime")
 
 try:
     from app.core.models import TinyLM

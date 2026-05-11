@@ -271,12 +271,18 @@ train-neurx-s-multimodal: ensure-neurx-framework
 train-chinese: ensure-neurx-framework
 	@echo "开始训练中文文本能力..."
 	@echo "batch_size=$(CHINESE_BATCH_SIZE), epochs=$(CHINESE_EPOCHS), lr=$(CHINESE_LR)"
-	$(PYTHON) -m app.training.train_simple_neurx \
-		--batch-size $(CHINESE_BATCH_SIZE) \
-		--epochs $(CHINESE_EPOCHS) \
-		--learning-rate $(CHINESE_LR) \
-		--checkpoint $(CHINESE_CHECKPOINT) \
-		--output $(CHINESE_OUTPUT)
+	@if $(PYTHON) -c "import neurx, neurx.nn as nn; from neurx.optim import Adam; assert hasattr(neurx, 'Tensor') and hasattr(nn, 'Module')" >/dev/null 2>&1; then \
+		echo "✓ 检测到完整 NeurX Python 训练运行时，执行 train_simple_neurx"; \
+		$(PYTHON) -m app.training.train_simple_neurx \
+			--batch-size $(CHINESE_BATCH_SIZE) \
+			--epochs $(CHINESE_EPOCHS) \
+			--learning-rate $(CHINESE_LR) \
+			--checkpoint $(CHINESE_CHECKPOINT) \
+			--output $(CHINESE_OUTPUT); \
+	else \
+		echo "⚠️  当前环境缺少完整 NeurX Python 训练运行时，自动回退到纯 S 训练导出流程"; \
+		bash scripts/s_only_train_bundle.sh; \
+	fi
 
 # NeurX 框架训练（推荐）
 train-neurx: ensure-neurx-framework

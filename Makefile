@@ -1,34 +1,9 @@
-.PHONY: help install test step1 step2 step3 bootstrap-check ensure-neurx-framework train train-basic train-core train-multimodal train-neurx-s-multimodal train-chinese train-neurx-dataset train-flow train-s-dataset serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down deploy-model deploy-model-s-dataset clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services logs logs-follow
+.PHONY: help install test step1 step2 step3 bootstrap-check train train-s-dataset serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down deploy-model deploy-model-s-dataset clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services logs logs-follow
 
 .DEFAULT_GOAL := train
 
-# Python解释器（优先使用项目内虚拟环境）
-PYTHON := $(shell if [ -x ./venv/bin/python ]; then echo ./venv/bin/python; else echo python3; fi)
-
-# Python路径（以app为唯一源码根）
-export PYTHONPATH:=.
-
 # 核心模型 checkpoint (所有模态共用)
 CORE_MODEL_CHECKPOINT ?= checkpoints/model_core.pkl
-
-# 视觉训练参数（可在命令行覆盖）
-VISION_DATA_SOURCE ?= cifar10
-VISION_BATCH_SIZE ?= 8
-VISION_EPOCHS ?= 1
-VISION_MAX_STEPS ?= 0
-VISION_LR ?= 1e-4
-VISION_DATASET_NAME ?= nlphuji/flickr30k
-VISION_CHECKPOINT ?= $(CORE_MODEL_CHECKPOINT)
-VISION_OUTPUT ?= $(CORE_MODEL_CHECKPOINT)
-S_COMPILE_ALLOW_FAIL ?= 1
-
-# 多模态训练参数（默认使用仓库内迷你图文数据，便于验证 S runtime 闭环）
-MULTIMODAL_DATA_PATH ?= tmp/minivl_data
-MULTIMODAL_BATCH_SIZE ?= 2
-MULTIMODAL_EPOCHS ?= 1
-MULTIMODAL_IMAGE_SIZE ?= 32
-MULTIMODAL_HIDDEN_DIM ?= 128
-MULTIMODAL_OUTPUT ?= checkpoints/model_neurx_s_multimodal.pkl
 
 # S runtime 参数
 S_COMPILER ?= /usr/local/bin/s
@@ -37,15 +12,8 @@ S_SOURCE_ROOT ?= /app/neurx/s
 S_MODEL_SOURCE_ROOT ?= /app/neurx-model/s
 S_IR_DIR ?= reports/s_ir
 
-# 中文文本训练参数（可在命令行覆盖）
-CHINESE_DATA_SOURCE ?= wikitext_zh
-CHINESE_BATCH_SIZE ?= 4
-CHINESE_EPOCHS ?= 3
-CHINESE_MAX_STEPS ?= 0
-CHINESE_LR ?= 1e-4
-CHINESE_CHECKPOINT ?= $(CORE_MODEL_CHECKPOINT)
-CHINESE_OUTPUT ?= $(CORE_MODEL_CHECKPOINT)
-DATASET_FILE ?=
+# 默认使用仓库内文本语料作为纯 S 数据集输入
+DATASET_FILE ?= dataset/text/neurx_train_mix_v1.txt
 
 # 颜色输出
 GREEN := \033[0;32m
@@ -70,12 +38,7 @@ help:
 	@echo "  make step2            - 第二步: 验证单步反向传播"
 	@echo "  make step3            - 第三步: 迷你训练10步验证"
 	@echo "  make bootstrap-check  - 一次跑完 step1/step2/step3"
-	@echo "  make train            - 开始训练模型(默认:中文文本)"
-	@echo "  make train-core       - 使用自研后端训练"
-	@echo "  make train-chinese    - 训练中文文本能力"
-	@echo "  make train-multimodal - 完整多模态训练"
-	@echo "  make train-basic      - 基础文本训练"
-	@echo "  make train-flow       - 一键训练流(dataset -> checkpoint -> report)"
+	@echo "  make train            - 纯S训练/部署默认入口"
 	@echo "  make train-s-dataset DATASET_FILE=... - 纯S链路绑定真实数据集导出"
 	@echo "  make serve            - 启动推理API服务(使用统一模型)"
 	@echo "  make serve-dev        - 启动推理API服务(开发热更新)"
@@ -122,201 +85,6 @@ help:
 	@echo "  make clean-all        - 清理所有生成文件"
 	@echo ""
 
-# 检查是否在虚拟环境中
-check-venv:
-	@if [ -z "$$VIRTUAL_ENV" ]; then \
-		echo "❌ 错误：未检测到虚拟环境！"; \
-		echo ""; \
-		echo "请先创建并激活虚拟环境："; \
-		echo "  方式1: make setup && source venv/bin/activate"; \
-		echo "  方式2: python3 -m venv venv && source venv/bin/activate"; \
-		echo ""; \
-		echo "然后再运行: make install"; \
-		exit 1; \
-	fi
-
-# 安装依赖（需要在虚拟环境中）
-install: check-venv
-	@echo "安装项目依赖..."
-	$(PYTHON) -m pip install --upgrade pip
-	$(PYTHON) -m pip install -r requirements.txt
-	@echo "${GREEN}✓ 依赖安装完成${NC}"
-
-# 强制安装（不检查虚拟环境，不推荐）
-install-force:
-	@echo "${YELLOW}⚠️  强制安装依赖（不推荐，可能影响系统Python）...${NC}"
-	$(PYTHON) -m pip install --upgrade pip --break-system-packages
-	$(PYTHON) -m pip install -r requirements.txt --break-system-packages
-	@echo "${GREEN}✓ 依赖安装完成${NC}"
-
-# 创建虚拟环境并安装依赖
-setup:
-	@echo "创建虚拟环境..."
-	$(PYTHON) -m venv venv
-	@echo "${GREEN}✓ 虚拟环境创建完成: venv/${NC}"
-	@echo ""
-	@echo "激活虚拟环境："
-	@echo "  Linux/Mac: source venv/bin/activate"
-	@echo "  Windows:   venv\\Scripts\\activate"
-	@echo ""
-	@echo "然后运行: make install"
-
-# 一键安装（创建venv并安装依赖）
-setup-all:
-	@echo "创建虚拟环境并安装依赖..."
-	@if [ ! -d "venv" ]; then \
-		echo "创建虚拟环境..."; \
-		$(PYTHON) -m venv venv; \
-	fi
-	@echo "安装依赖到虚拟环境..."
-	@./venv/bin/pip install --upgrade pip
-	@./venv/bin/pip install -r requirements.txt
-	@echo ""
-	@echo "${GREEN}✓ 设置完成！${NC}"
-	@echo ""
-	@echo "激活虚拟环境："
-	@echo "  source venv/bin/activate"
-	@echo ""
-	@echo "然后可以运行："
-	@echo "  make test    # 测试模型"
-	@echo "  make train   # 训练模型"
-
-# 运行模型测试
-test:
-	@echo "运行基础验收链路..."
-	$(MAKE) step1
-	$(MAKE) step2
-	$(PYTHON) test/regression_batched_matmul_grad.py
-	$(MAKE) step3
-	$(PYTHON) test/test_model.py
-	@echo "✓ 基础验收链路全部通过"
-
-# 第一步：模型前向传播最小验证
-step1:
-	@echo "第一步：验证模型前向传播..."
-	$(PYTHON) test/step1_forward.py
-
-# 第二步：单步反向传播最小验证
-step2:
-	@echo "第二步：验证单步反向传播..."
-	$(PYTHON) test/step2_backward.py
-
-# 第三步：迷你训练10步验证
-step3:
-	@echo "第三步：迷你训练10步验证..."
-	$(PYTHON) test/step3_mini_train.py
-
-# 串行执行 Step1/Step2/Step3 启动验证
-bootstrap-check:
-	@echo "启动引导检查: step1 -> step2 -> step3"
-	$(MAKE) step1
-	$(MAKE) step2
-	$(MAKE) step3
-	@echo "✓ bootstrap-check 全部通过"
-
-ensure-neurx-framework:
-	@if $(PYTHON) -c "import neurx" >/dev/null 2>&1; then \
-		echo "✓ 检测到 neurx 框架（$(PYTHON)）"; \
-	else \
-		echo "未检测到 neurx，开始编译并安装 /app/neurx ..."; \
-		$(MAKE) -C /app/neurx PYTHON="$(PYTHON)" install-local; \
-		$(PYTHON) -c "import neurx" >/dev/null 2>&1 || { echo "❌ neurx 安装后仍不可用"; exit 1; }; \
-	fi
-
-# 训练模型（默认：中文文本训练）
-train: ensure-neurx-framework
-	@echo "开始训练模型..."
-	@echo "使用中文文本训练（推荐）"
-	@echo "其他选项: make train-multimodal, make train-basic"
-	@echo ""
-	$(MAKE) train-chinese
-
-# 基础文本训练（原始训练脚本）
-train-basic:
-	@echo "开始基础文本训练..."
-	$(PYTHON) -m app.training.train
-
-train-core: ensure-neurx-framework
-	@echo "开始自研后端训练..."
-	$(PYTHON) -m app.training.train_core
-
-# 多模态训练
-train-multimodal: ensure-neurx-framework
-	@echo "开始多模态训练模型..."
-	LLM_MULTIMODAL=1 $(PYTHON) -m app.training.train_vision_real \
-		--data-source local \
-		--data-path $(MULTIMODAL_DATA_PATH) \
-		--batch-size $(MULTIMODAL_BATCH_SIZE) \
-		--epochs $(MULTIMODAL_EPOCHS) \
-		--image-size $(MULTIMODAL_IMAGE_SIZE) \
-		--hidden-dim $(MULTIMODAL_HIDDEN_DIM) \
-		--output $(MULTIMODAL_OUTPUT)
-
-train-neurx-s-multimodal: ensure-neurx-framework
-	@echo "开始使用最新 S 版 neurx 预编译校验的多模态训练..."
-	LLM_MULTIMODAL=1 $(PYTHON) -m app.training.train_multimodal_neurx_s \
-		--data-source local \
-		--data-path $(MULTIMODAL_DATA_PATH) \
-		--batch-size $(MULTIMODAL_BATCH_SIZE) \
-		--epochs $(MULTIMODAL_EPOCHS) \
-		--image-size $(MULTIMODAL_IMAGE_SIZE) \
-		--hidden-dim $(MULTIMODAL_HIDDEN_DIM) \
-		--output $(MULTIMODAL_OUTPUT) \
-		--s-runtime-mode $(S_RUNTIME_MODE) \
-		--s-compiler $(S_COMPILER) \
-		--s-source-root $(S_SOURCE_ROOT) \
-		--s-model-source-root $(S_MODEL_SOURCE_ROOT) \
-		--s-ir-dir $(S_IR_DIR) \
-		$$( [ "$(S_COMPILE_ALLOW_FAIL)" = "1" ] && echo "--allow-s-compile-fail" )
-
-# 中文文本训练（支持参数覆盖）
-# 示例:
-#   make train-chinese
-#   make train-chinese CHINESE_DATA_SOURCE=zhwiki CHINESE_EPOCHS=5
-#   make train-chinese CHINESE_DATA_SOURCE=baidubaike CHINESE_BATCH_SIZE=16
-train-chinese: ensure-neurx-framework
-	@echo "开始训练中文文本能力..."
-	@echo "batch_size=$(CHINESE_BATCH_SIZE), epochs=$(CHINESE_EPOCHS), lr=$(CHINESE_LR)"
-	@if $(PYTHON) -c "import neurx, neurx.nn as nn; from neurx.optim import Adam; assert hasattr(neurx, 'Tensor') and hasattr(nn, 'Module')" >/dev/null 2>&1; then \
-		echo "✓ 检测到完整 NeurX Python 训练运行时，执行 train_simple_neurx"; \
-		$(PYTHON) -m app.training.train_simple_neurx \
-			--batch-size $(CHINESE_BATCH_SIZE) \
-			--epochs $(CHINESE_EPOCHS) \
-			--learning-rate $(CHINESE_LR) \
-			--checkpoint $(CHINESE_CHECKPOINT) \
-			--output $(CHINESE_OUTPUT); \
-	else \
-		echo "⚠️  当前环境缺少完整 NeurX Python 训练运行时，自动回退到纯 S 训练导出流程"; \
-		DATASET_FILE="$(DATASET_FILE)" bash scripts/s_only_train_bundle.sh; \
-	fi
-
-# NeurX 框架训练（推荐）
-train-neurx: ensure-neurx-framework
-	@echo "开始使用 NeurX 框架训练..."
-	@echo "batch_size=4, epochs=3, lr=1e-4"
-	$(PYTHON) -m app.training.train_simple_neurx \
-		--batch-size 4 \
-		--epochs 3 \
-		--learning-rate 1e-4 \
-		--hidden-dim 256 \
-		--num-layers 2
-
-train-neurx-dataset: ensure-neurx-framework
-	@echo "使用 dataset 目录语料训练 NeurX 模型..."
-	$(PYTHON) -m app.training.train_neurx \
-		--model-size tiny \
-		--num-epochs 1 \
-		--batch-size 8 \
-		--seq-len 64 \
-		--learning-rate 1e-4 \
-		--num-batches-per-epoch 50 \
-		--dataset-file dataset/text/neurx_train_mix_v1.txt \
-		--save-path checkpoints/model_neurx_dataset.pkl
-
-train-flow:
-	@echo "执行一键训练流..."
-	bash scripts/train_flow.sh
-
 train-s-dataset:
 	@if [ -z "$(DATASET_FILE)" ]; then \
 		echo "❌ 请指定 DATASET_FILE，例如: make train-s-dataset DATASET_FILE=dataset/text/train.txt"; \
@@ -324,6 +92,8 @@ train-s-dataset:
 	fi
 	@echo "使用纯S链路导出并绑定数据集: $(DATASET_FILE)"
 	@DATASET_FILE="$(DATASET_FILE)" bash scripts/s_only_train_bundle.sh --dataset-file "$(DATASET_FILE)"
+
+train: train-s-dataset
 
 # 推理服务（开发）
 serve-dev:
@@ -450,7 +220,7 @@ deploy-local-down:
 
 deploy-model:
 	@echo "重新编译最新模型并部署到后端..."
-	$(MAKE) train
+	$(MAKE) train-s-dataset DATASET_FILE="$(DATASET_FILE)"
 	@echo "重启后端服务以加载 checkpoints/s_arch_latest.json ..."
 	systemctl restart neurx-model-backend.service
 	@echo "等待后端服务就绪..."

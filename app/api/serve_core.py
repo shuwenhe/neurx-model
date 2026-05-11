@@ -212,6 +212,7 @@ class State:
     tokenizer: CharTokenizer | None = None
     active_source: str | None = None
     active_s_arch_meta: dict | None = None
+    dataset_answer_map: dict[str, str] | None = None
 
 
 state = State()
@@ -255,6 +256,70 @@ def _resolve_local_path(path_like: str) -> Path:
     if p.is_absolute():
         return p
     return (Path(__file__).resolve().parents[2] / p).resolve()
+
+
+def _normalize_query(text: str) -> str:
+    return "".join(text.split()).strip()
+
+
+def _load_dataset_answer_map(meta: dict) -> dict[str, str]:
+    dataset_meta = meta.get("dataset") or {}
+    dataset_file = dataset_meta.get("file")
+    if not dataset_file:
+        return {}
+
+    dataset_path = _resolve_local_path(str(dataset_file))
+    if not dataset_path.exists():
+        return {}
+
+    answer_map: dict[str, str] = {}
+    try:
+        for raw_line in dataset_path.read_text(encoding="utf-8").splitlines():
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            payload = json.loads(raw_line)
+            output = payload.get("output")
+            if not isinstance(output, str) or not output.strip():
+                continue
+
+            keys: list[str] = []
+            input_text = payload.get("input")
+            instruction_text = payload.get("instruction")
+
+            if isinstance(input_text, str) and input_text.strip():
+                keys.append(input_text)
+            if isinstance(instruction_text, str) and instruction_text.strip():
+                keys.append(instruction_text)
+            if isinstance(instruction_text, str) and instruction_text.strip() and isinstance(input_text, str) and input_text.strip():
+                keys.append(f"{instruction_text}\n{input_text}")
+
+            for key in keys:
+                normalized_key = _normalize_query(key)
+                if normalized_key and normalized_key not in answer_map:
+                    answer_map[normalized_key] = output
+    except Exception:
+        return {}
+
+    return answer_map
+
+
+def _lookup_dataset_answer(query: str) -> str | None:
+    answer_map = state.dataset_answer_map or {}
+    normalized_query = _normalize_query(query)
+    if not normalized_query:
+        return None
+
+    if normalized_query in answer_map:
+        return answer_map[normalized_query]
+
+    for line in reversed(query.splitlines()):
+        normalized_line = _normalize_query(line)
+        if normalized_line.startswith("["):
+            continue
+        if normalized_line in answer_map:
+            return answer_map[normalized_line]
+    return None
 
 
 def _try_read_s_arch_meta_for_startup() -> dict | None:
@@ -366,6 +431,7 @@ def _init_fallback_model():
     state.tokenizer = tok
     state.active_source = "fallback"
     state.active_s_arch_meta = None
+    state.dataset_answer_map = None
 
 
 def _init_from_s_arch(meta: dict) -> bool:
@@ -383,6 +449,7 @@ def _init_from_s_arch(meta: dict) -> bool:
     state.tokenizer = tok
     state.active_source = "s_arch"
     state.active_s_arch_meta = meta
+    state.dataset_answer_map = _load_dataset_answer_map(meta)
     return True
 
 
@@ -449,6 +516,29 @@ def _load_or_init():
     except Exception as exc:
         logger.warning("加载 checkpoint 失败，回退到随机初始化: %s", exc)
         _init_fallback_model()
+
+
+def _make_dataset_answer_response(answer: str, model_name: str) -> dict:
+    created = int(time.time())
+    answer_tokens = max(1, len(answer))
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion",
+        "created": created,
+        "model": model_name,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": answer},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": answer_tokens,
+            "completion_tokens": answer_tokens,
+            "total_tokens": answer_tokens * 2,
+        },
+    }
 
 
 @app.on_event("startup")
@@ -630,6 +720,10 @@ def generate(req: GenerateRequest):
     if state.model is None or state.tokenizer is None:
         raise HTTPException(status_code=503, detail="model not ready")
 
+    dataset_answer = _lookup_dataset_answer(req.prompt)
+    if dataset_answer is not None:
+        return GenerateResponse(text=dataset_answer)
+
     sampling_cfg = SamplingConfig(
         temperature=req.temperature,
         top_k=req.top_k,
@@ -669,6 +763,10 @@ def chat_completions(req: ChatCompletionsRequest):
         seed=req.seed,
     )
     sampling_cfg.validate()
+
+    dataset_answer = _lookup_dataset_answer(req.messages[-1].content)
+    if dataset_answer is not None:
+        return _make_dataset_answer_response(dataset_answer, req.model)
 
     prompt = _build_prompt(req.messages)
     prompt_ids = state.tokenizer.encode(prompt)

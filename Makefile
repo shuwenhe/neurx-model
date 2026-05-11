@@ -1,4 +1,4 @@
-.PHONY: help install test step1 step2 step3 bootstrap-check ensure-neurx-framework train train-basic train-core train-multimodal train-neurx-s-multimodal train-chinese train-neurx-dataset train-flow serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down deploy-model clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services logs logs-follow
+.PHONY: help install test step1 step2 step3 bootstrap-check ensure-neurx-framework train train-basic train-core train-multimodal train-neurx-s-multimodal train-chinese train-neurx-dataset train-flow train-s-dataset serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down deploy-model deploy-model-s-dataset clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services logs logs-follow
 
 .DEFAULT_GOAL := train
 
@@ -45,6 +45,7 @@ CHINESE_MAX_STEPS ?= 0
 CHINESE_LR ?= 1e-4
 CHINESE_CHECKPOINT ?= $(CORE_MODEL_CHECKPOINT)
 CHINESE_OUTPUT ?= $(CORE_MODEL_CHECKPOINT)
+DATASET_FILE ?=
 
 # 颜色输出
 GREEN := \033[0;32m
@@ -75,6 +76,7 @@ help:
 	@echo "  make train-multimodal - 完整多模态训练"
 	@echo "  make train-basic      - 基础文本训练"
 	@echo "  make train-flow       - 一键训练流(dataset -> checkpoint -> report)"
+	@echo "  make train-s-dataset DATASET_FILE=... - 纯S链路绑定真实数据集导出"
 	@echo "  make serve            - 启动推理API服务(使用统一模型)"
 	@echo "  make serve-dev        - 启动推理API服务(开发热更新)"
 	@echo "  make serve-core       - 启动自研后端API服务"
@@ -95,6 +97,7 @@ help:
 	@echo "  make obs-up           - 启动可观测性栈(LLM+Prometheus+Grafana)"
 	@echo "  make obs-down         - 停止可观测性栈"
 	@echo "  make deploy-model     - 重新编译最新模型并重启后端加载"
+	@echo "  make deploy-model-s-dataset DATASET_FILE=... - 纯S链路使用真实数据集并上线"
 	@echo "  make logs             - 查看后端日志(文件+systemd+journal)"
 	@echo "  make logs-follow      - 实时跟踪后端文件日志"
 	@echo "  make deploy-local-up  - 启动本地标准部署编排(deploy/local)"
@@ -284,7 +287,7 @@ train-chinese: ensure-neurx-framework
 			--output $(CHINESE_OUTPUT); \
 	else \
 		echo "⚠️  当前环境缺少完整 NeurX Python 训练运行时，自动回退到纯 S 训练导出流程"; \
-		bash scripts/s_only_train_bundle.sh; \
+		DATASET_FILE="$(DATASET_FILE)" bash scripts/s_only_train_bundle.sh; \
 	fi
 
 # NeurX 框架训练（推荐）
@@ -313,6 +316,14 @@ train-neurx-dataset: ensure-neurx-framework
 train-flow:
 	@echo "执行一键训练流..."
 	bash scripts/train_flow.sh
+
+train-s-dataset:
+	@if [ -z "$(DATASET_FILE)" ]; then \
+		echo "❌ 请指定 DATASET_FILE，例如: make train-s-dataset DATASET_FILE=dataset/text/train.txt"; \
+		exit 1; \
+	fi
+	@echo "使用纯S链路导出并绑定数据集: $(DATASET_FILE)"
+	@DATASET_FILE="$(DATASET_FILE)" bash scripts/s_only_train_bundle.sh --dataset-file "$(DATASET_FILE)"
 
 # 推理服务（开发）
 serve-dev:
@@ -440,6 +451,23 @@ deploy-local-down:
 deploy-model:
 	@echo "重新编译最新模型并部署到后端..."
 	$(MAKE) train
+	@echo "重启后端服务以加载 checkpoints/s_arch_latest.json ..."
+	systemctl restart neurx-model-backend.service
+	@echo "等待后端服务就绪..."
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		curl -fsS http://127.0.0.1:8000/v1/model-status >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	@echo "当前后端模型状态:"
+	@curl -fsS http://127.0.0.1:8000/v1/model-status
+
+deploy-model-s-dataset:
+	@if [ -z "$(DATASET_FILE)" ]; then \
+		echo "❌ 请指定 DATASET_FILE，例如: make deploy-model-s-dataset DATASET_FILE=dataset/text/train.txt"; \
+		exit 1; \
+	fi
+	@echo "使用纯S链路+真实数据集重新导出并部署..."
+	$(MAKE) train-s-dataset DATASET_FILE="$(DATASET_FILE)"
 	@echo "重启后端服务以加载 checkpoints/s_arch_latest.json ..."
 	systemctl restart neurx-model-backend.service
 	@echo "等待后端服务就绪..."

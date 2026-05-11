@@ -1,4 +1,4 @@
-.PHONY: help install test step1 step2 step3 bootstrap-check ensure-neurx-framework train train-basic train-core train-multimodal train-neurx-s-multimodal train-chinese train-neurx-dataset train-flow serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services logs logs-follow
+.PHONY: help install test step1 step2 step3 bootstrap-check ensure-neurx-framework train train-basic train-core train-multimodal train-neurx-s-multimodal train-chinese train-neurx-dataset train-flow serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down deploy-model clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services logs logs-follow
 
 .DEFAULT_GOAL := train
 
@@ -94,6 +94,7 @@ help:
 	@echo "${YELLOW}可观测性:${NC}"
 	@echo "  make obs-up           - 启动可观测性栈(LLM+Prometheus+Grafana)"
 	@echo "  make obs-down         - 停止可观测性栈"
+	@echo "  make deploy-model     - 重新编译最新模型并重启后端加载"
 	@echo "  make logs             - 查看后端日志(文件+systemd+journal)"
 	@echo "  make logs-follow      - 实时跟踪后端文件日志"
 	@echo "  make deploy-local-up  - 启动本地标准部署编排(deploy/local)"
@@ -436,6 +437,19 @@ deploy-local-down:
 	@echo "停止本地标准部署编排..."
 	docker compose -f deploy/local/docker-compose.yml down
 
+deploy-model:
+	@echo "重新编译最新模型并部署到后端..."
+	$(MAKE) train
+	@echo "重启后端服务以加载 checkpoints/s_arch_latest.json ..."
+	systemctl restart neurx-model-backend.service
+	@echo "等待后端服务就绪..."
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		curl -fsS http://127.0.0.1:8000/v1/model-status >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	@echo "当前后端模型状态:"
+	@curl -fsS http://127.0.0.1:8000/v1/model-status
+
 # 创建演示模型（用于快速测试，无需训练）
 demo:
 	@echo "创建演示模型..."
@@ -544,6 +558,13 @@ logs:
 		echo "logs/backend.out 不存在"; \
 	fi
 	@echo ""
+	@echo "== backend recent request lines (from file) =="
+	@if [ -f logs/backend.out ]; then \
+		grep -E '"(GET|POST|PUT|DELETE) /(v1|healthz|readyz|metrics)' logs/backend.out | tail -n 60 || true; \
+	else \
+		echo "logs/backend.out 不存在"; \
+	fi
+	@echo ""
 	@echo "== systemd status (neurx-model-backend.service) =="
 	@if command -v systemctl >/dev/null 2>&1; then \
 		systemctl --no-pager --lines=40 status neurx-model-backend.service || true; \
@@ -557,12 +578,36 @@ logs:
 	else \
 		echo "journalctl 不可用"; \
 	fi
+	@echo ""
+	@echo "== backend recent request lines (from journal) =="
+	@if command -v journalctl >/dev/null 2>&1; then \
+		journalctl -u neurx-model-backend.service -n 300 --no-pager | grep -E '"(GET|POST|PUT|DELETE) /(v1|healthz|readyz|metrics)' | tail -n 60 || true; \
+	else \
+		echo "journalctl 不可用"; \
+	fi
+	@echo ""
+	@echo "== nginx access (frontend + api via :8080, last 80 lines) =="
+	@if [ -f /var/log/nginx/access.log ]; then \
+		tail -n 80 /var/log/nginx/access.log; \
+	else \
+		echo "/var/log/nginx/access.log 不存在或不可读"; \
+	fi
+	@echo ""
+	@echo "== nginx error (last 40 lines) =="
+	@if [ -f /var/log/nginx/error.log ]; then \
+		tail -n 40 /var/log/nginx/error.log; \
+	else \
+		echo "/var/log/nginx/error.log 不存在或不可读"; \
+	fi
 
 # 实时跟踪后端文件日志
 logs-follow:
-	@if [ -f logs/backend.out ]; then \
-		tail -f logs/backend.out; \
+	@echo "等待前端请求中（Ctrl+C 退出）..."
+	@if command -v journalctl >/dev/null 2>&1; then \
+		journalctl -u neurx-model-backend.service -f --no-pager | grep --line-buffered -E '"(GET|POST|PUT|DELETE) /'; \
+	elif [ -f logs/backend.out ]; then \
+		tail -f logs/backend.out | grep --line-buffered -E '"(GET|POST|PUT|DELETE) /'; \
 	else \
-		echo "logs/backend.out 不存在"; \
+		echo "journalctl 不可用且 logs/backend.out 不存在"; \
 		exit 1; \
 	fi

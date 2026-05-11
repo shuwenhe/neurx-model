@@ -1,4 +1,4 @@
-.PHONY: help install test step1 step2 step3 bootstrap-check ensure-neurx-framework train train-basic train-core train-multimodal train-neurx-s-multimodal train-chinese train-neurx-dataset train-flow serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services
+.PHONY: help install test step1 step2 step3 bootstrap-check ensure-neurx-framework train train-basic train-core train-multimodal train-neurx-s-multimodal train-chinese train-neurx-dataset train-flow serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services logs logs-follow
 
 .DEFAULT_GOAL := train
 
@@ -94,6 +94,8 @@ help:
 	@echo "${YELLOW}可观测性:${NC}"
 	@echo "  make obs-up           - 启动可观测性栈(LLM+Prometheus+Grafana)"
 	@echo "  make obs-down         - 停止可观测性栈"
+	@echo "  make logs             - 查看后端日志(文件+systemd+journal)"
+	@echo "  make logs-follow      - 实时跟踪后端文件日志"
 	@echo "  make deploy-local-up  - 启动本地标准部署编排(deploy/local)"
 	@echo "  make deploy-local-down - 停止本地标准部署编排(deploy/local)"
 	@echo ""
@@ -532,3 +534,35 @@ status-services:
 	@echo ""
 	@echo "Nginx 状态:"
 	@systemctl --no-pager --lines=30 status nginx || true
+
+# 查看后端日志（文件 + systemd + journal）
+logs:
+	@echo "== backend.out (last 120 lines) =="
+	@if [ -f logs/backend.out ]; then \
+		tail -n 120 logs/backend.out; \
+	else \
+		echo "logs/backend.out 不存在"; \
+	fi
+	@echo ""
+	@echo "== systemd status (neurx-model-backend.service) =="
+	@if command -v systemctl >/dev/null 2>&1; then \
+		systemctl --no-pager --lines=40 status neurx-model-backend.service || true; \
+	else \
+		echo "systemctl 不可用"; \
+	fi
+	@echo ""
+	@echo "== journal (last 80 lines) =="
+	@if command -v journalctl >/dev/null 2>&1; then \
+		journalctl -u neurx-model-backend.service -n 80 --no-pager || true; \
+	else \
+		echo "journalctl 不可用"; \
+	fi
+
+# 实时跟踪后端文件日志
+logs-follow:
+	@if [ -f logs/backend.out ]; then \
+		tail -f logs/backend.out; \
+	else \
+		echo "logs/backend.out 不存在"; \
+		exit 1; \
+	fi

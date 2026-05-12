@@ -12,8 +12,8 @@ S_SOURCE_ROOT ?= /app/neurx/s
 S_MODEL_SOURCE_ROOT ?= /app/neurx-model/s
 S_IR_DIR ?= reports/s_ir
 
-# 默认使用仓库内文本语料作为纯 S 数据集输入
-DATASET_FILE ?= dataset/text/neurx_train_mix_v1.txt
+# 默认使用仓库内已清洗训练集作为纯 S 数据集输入
+DATASET_FILE ?= dataset/text/Neurx-SFT-Text-v1.finalclean.train.jsonl
 
 # 颜色输出
 GREEN := \033[0;32m

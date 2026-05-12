@@ -7,6 +7,7 @@ import time
 import uuid
 import json
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -262,6 +263,59 @@ def _normalize_query(text: str) -> str:
     return "".join(text.split()).strip()
 
 
+def _sanitize_user_query(text: str) -> str:
+    """Extract a cleaner user question from noisy/repetitive input text."""
+    raw = text.strip()
+    if not raw:
+        return ""
+
+    # Common separator in copied noisy prompts.
+    if "---" in raw:
+        raw = raw.split("---")[-1].strip() or raw
+
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if lines:
+        # Prefer lines that look like actual questions/requests.
+        scored: list[tuple[int, str]] = []
+        for line in lines:
+            score = 0
+            if any(k in line for k in ("为什么", "怎么", "如何", "什么", "请", "?", "？", "吗")):
+                score += 3
+            if 4 <= len(line) <= 220:
+                score += 1
+            unique_ratio = len(set(line)) / max(1, len(line))
+            if unique_ratio > 0.45:
+                score += 1
+            scored.append((score, line))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        raw = scored[0][1]
+
+    # Collapse very long repeated character runs.
+    raw = re.sub(r"(.)\1{3,}", r"\1\1", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    return raw
+
+
+def _is_low_quality_query(original: str, sanitized: str) -> bool:
+    original_n = _normalize_query(original)
+    sanitized_n = _normalize_query(sanitized)
+    if not original_n:
+        return True
+
+    unique_ratio = len(set(original_n)) / max(1, len(original_n))
+    long_and_repetitive = len(original_n) >= 80 and unique_ratio < 0.36
+    heavily_changed = len(original_n) >= 60 and len(sanitized_n) <= int(len(original_n) * 0.45)
+    too_short_after_clean = len(sanitized_n) < 3
+    return long_and_repetitive or heavily_changed or too_short_after_clean
+
+
+def _clarification_text() -> str:
+    return (
+        "你的输入里包含较多重复或噪声字符，我可能无法精准回答。"
+        "请按“背景、问题、期望结果”三行重写，我会给出更准确的答案。"
+    )
+
+
 def _load_dataset_answer_map(meta: dict) -> dict[str, str]:
     dataset_meta = meta.get("dataset") or {}
     dataset_file = dataset_meta.get("file")
@@ -302,6 +356,54 @@ def _load_dataset_answer_map(meta: dict) -> dict[str, str]:
         return {}
 
     return answer_map
+
+
+def _build_s_arch_tokenizer(meta: dict) -> CharTokenizer:
+    """Build tokenizer for S-arch serving using dataset texts when available.
+
+    This avoids a tiny fixed vocab that makes non-exact-match generation degrade.
+    """
+    seed_texts = ["你好", "神经网络", "S语言", "模型部署", "后端服务"]
+    dataset_meta = meta.get("dataset") or {}
+    dataset_file = dataset_meta.get("file")
+    if not dataset_file:
+        return CharTokenizer.from_texts(seed_texts)
+
+    dataset_path = _resolve_local_path(str(dataset_file))
+    if not dataset_path.exists():
+        return CharTokenizer.from_texts(seed_texts)
+
+    sampled_texts: list[str] = []
+    # Limit startup overhead while still covering common corpus characters.
+    max_lines = int(os.getenv("LLM_S_ARCH_TOKENIZER_MAX_LINES", "6000"))
+    max_chars_per_field = int(os.getenv("LLM_S_ARCH_TOKENIZER_MAX_CHARS", "256"))
+
+    try:
+        for raw_line in dataset_path.read_text(encoding="utf-8").splitlines():
+            if len(sampled_texts) >= max_lines:
+                break
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                payload = json.loads(raw_line)
+            except Exception:
+                # Fallback for plain-text datasets.
+                sampled_texts.append(raw_line[:max_chars_per_field])
+                continue
+
+            for key in ("instruction", "input", "output"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    sampled_texts.append(value[:max_chars_per_field])
+                    if len(sampled_texts) >= max_lines:
+                        break
+    except Exception:
+        return CharTokenizer.from_texts(seed_texts)
+
+    if not sampled_texts:
+        return CharTokenizer.from_texts(seed_texts)
+    return CharTokenizer.from_texts(seed_texts + sampled_texts)
 
 
 def _lookup_dataset_answer(query: str) -> str | None:
@@ -442,7 +544,7 @@ def _init_from_s_arch(meta: dict) -> bool:
     if not bin_path.exists():
         return False
 
-    tok = CharTokenizer.from_texts(["你好", "神经网络", "S语言", "模型部署", "后端服务"])
+    tok = _build_s_arch_tokenizer(meta)
     model = SArchBinModel(bin_path=str(bin_path), vocab_size=tok.vocab_size, max_seq_len=128)
 
     state.model = model
@@ -720,9 +822,13 @@ def generate(req: GenerateRequest):
     if state.model is None or state.tokenizer is None:
         raise HTTPException(status_code=503, detail="model not ready")
 
-    dataset_answer = _lookup_dataset_answer(req.prompt)
+    sanitized_prompt = _sanitize_user_query(req.prompt)
+    dataset_answer = _lookup_dataset_answer(sanitized_prompt)
     if dataset_answer is not None:
         return GenerateResponse(text=dataset_answer)
+
+    if _is_low_quality_query(req.prompt, sanitized_prompt):
+        return GenerateResponse(text=_clarification_text())
 
     sampling_cfg = SamplingConfig(
         temperature=req.temperature,
@@ -732,7 +838,7 @@ def generate(req: GenerateRequest):
         seed=req.seed,
     )
     sampling_cfg.validate()
-    ids = state.tokenizer.encode(req.prompt)
+    ids = state.tokenizer.encode(sanitized_prompt)
     if not ids:
         ids = [0]
 
@@ -742,8 +848,8 @@ def generate(req: GenerateRequest):
         sampling_cfg=sampling_cfg,
         stop_sequences=[],
     )
-    if text.startswith(req.prompt):
-        text = text[len(req.prompt):]
+    if text.startswith(sanitized_prompt):
+        text = text[len(sanitized_prompt):]
 
     return GenerateResponse(text=text)
 
@@ -764,11 +870,18 @@ def chat_completions(req: ChatCompletionsRequest):
     )
     sampling_cfg.validate()
 
-    dataset_answer = _lookup_dataset_answer(req.messages[-1].content)
+    user_query = req.messages[-1].content
+    sanitized_user_query = _sanitize_user_query(user_query)
+    dataset_answer = _lookup_dataset_answer(sanitized_user_query)
     if dataset_answer is not None:
         return _make_dataset_answer_response(dataset_answer, req.model)
 
-    prompt = _build_prompt(req.messages)
+    if _is_low_quality_query(user_query, sanitized_user_query):
+        return _make_dataset_answer_response(_clarification_text(), req.model)
+
+    prompt_messages = req.messages[:-1] + [ChatMessage(role="user", content=sanitized_user_query)]
+
+    prompt = _build_prompt(prompt_messages)
     prompt_ids = state.tokenizer.encode(prompt)
     if not prompt_ids:
         prompt_ids = [0]

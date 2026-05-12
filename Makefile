@@ -1,4 +1,4 @@
-.PHONY: help install test step1 step2 step3 bootstrap-check train train-s-dataset serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down deploy-model deploy-model-s-dataset clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services logs logs-follow
+.PHONY: help install test step1 step2 step3 bootstrap-check train train-s-dataset serve serve-dev serve-core serve-core-dev obs-up obs-down generate quick-generate quick-test-multimodal demo gateway inference-generate inference-quick deploy-local-up deploy-local-down deploy-model deploy-model-s-dataset precision-test clean clean-checkpoints clean-all frontend-install frontend-dev frontend-build frontend-start kill-frontend kill-backend dev-all install-systemd-nginx restart-services status-services logs logs-follow
 
 .DEFAULT_GOAL := train
 
@@ -69,6 +69,7 @@ help:
 	@echo "${YELLOW}工具与测试:${NC}"
 	@echo "  make generate         - 运行交互式文本生成"
 	@echo "  make quick-generate   - 批量测试生成参数"
+	@echo "  make precision-test   - 运行精准度回归测试(lookup + api flow + structured logs)"
 	@echo "  make gateway          - 启动网关服务(services/gateway)"
 	@echo "  make inference-generate - 通过services边界运行生成"
 	@echo "  make inference-quick  - 通过services边界运行快速生成"
@@ -209,6 +210,10 @@ quick-generate:
 inference-quick:
 	@echo "通过services边界批量测试生成参数..."
 	$(PYTHON) -m services.inference.quick_generate
+
+precision-test:
+	@echo "运行精准度回归测试..."
+	./venv/bin/python -m pytest -q test/test_precision_lookup.py test/test_api_precision_flow.py
 
 deploy-local-up:
 	@echo "启动本地标准部署编排..."

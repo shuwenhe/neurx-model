@@ -8,7 +8,8 @@ import uuid
 import json
 import hashlib
 import re
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -214,10 +215,20 @@ class State:
     active_source: str | None = None
     active_s_arch_meta: dict | None = None
     dataset_answer_map: dict[str, str] | None = None
+    dataset_canonical_answer_map: dict[str, str] | None = None
+    retrieval_stats: dict[str, int] = field(default_factory=dict)
 
 
 state = State()
-app = FastAPI(title="LLM Core API", version="0.1.0")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    _load_or_init()
+    yield
+
+
+app = FastAPI(title="LLM Core API", version="0.1.0", lifespan=lifespan)
 
 # 配置 CORS
 app.add_middleware(
@@ -260,7 +271,35 @@ def _resolve_local_path(path_like: str) -> Path:
 
 
 def _normalize_query(text: str) -> str:
-    return "".join(text.split()).strip()
+    compact = "".join(text.split()).strip().lower()
+    # Keep only CJK/alnum for robust matching across punctuation variants.
+    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", compact)
+
+
+def _canonicalize_lookup_query(normalized: str) -> str:
+    out = normalized
+    # Remove common Chinese question wrappers to improve factual lookup recall.
+    for token in (
+        "请问",
+        "一下",
+        "是什么",
+        "是哪里",
+        "在哪里",
+        "在哪",
+        "是哪",
+        "哪里",
+        "哪个",
+        "哪儿",
+        "哪",
+        "是谁",
+        "怎么",
+        "如何",
+        "吗",
+        "的",
+        "是",
+    ):
+        out = out.replace(token, "")
+    return out
 
 
 def _sanitize_user_query(text: str) -> str:
@@ -274,6 +313,20 @@ def _sanitize_user_query(text: str) -> str:
         raw = raw.split("---")[-1].strip() or raw
 
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
+
+    # Prefer explicit structured question line when user provides
+    # "背景/问题/期望" style input.
+    for line in lines:
+        if line.startswith("问题：") or line.startswith("问题:"):
+            candidate = line.split("：", 1)[-1] if "：" in line else line.split(":", 1)[-1]
+            candidate = candidate.strip()
+            if candidate:
+                raw = candidate
+                # Structured question line should take precedence.
+                raw = re.sub(r"(.)\1{3,}", r"\1\1", raw)
+                raw = re.sub(r"\s+", " ", raw).strip()
+                return raw
+
     if lines:
         # Prefer lines that look like actual questions/requests.
         scored: list[tuple[int, str]] = []
@@ -296,21 +349,53 @@ def _sanitize_user_query(text: str) -> str:
     return raw
 
 
+def _try_s_serve_policy(*args):
+    try:
+        from neurx.compile.runtime import try_invoke_ops_function
+
+        return try_invoke_ops_function("serve_should_clarify", *args)
+    except Exception:
+        return None
+
+
 def _is_low_quality_query(original: str, sanitized: str) -> bool:
     original_n = _normalize_query(original)
     sanitized_n = _normalize_query(sanitized)
     if not original_n:
         return True
 
+    has_structured_fields = all(k in original for k in ("背景", "问题", "期望"))
+    if has_structured_fields and len(sanitized_n) >= 3 and any(k in sanitized_n for k in ("什么", "哪里", "谁", "为何", "为什么", "怎么", "如何", "吗")):
+        return False
+
     unique_ratio = len(set(original_n)) / max(1, len(original_n))
     non_word_ratio = len(re.findall(r"[^\u4e00-\u9fffA-Za-z0-9]", original_n)) / max(1, len(original_n))
     query_markers = re.findall(r"为什么|怎么|如何|什么|请|是否|能否|吗|\?|？", sanitized_n)
 
     long_and_repetitive = len(original_n) >= 60 and unique_ratio < 0.42
-    heavily_changed = len(original_n) >= 50 and len(sanitized_n) <= int(len(original_n) * 0.55)
+    heavily_changed = (
+        len(original_n) >= 50
+        and len(sanitized_n) <= int(len(original_n) * 0.55)
+        and not has_structured_fields
+    )
     noisy_symbols = len(original_n) >= 40 and non_word_ratio > 0.18
     lacks_query_focus = len(original_n) >= 45 and len(query_markers) == 0
     too_short_after_clean = len(sanitized_n) < 3
+
+    s_result = _try_s_serve_policy(
+        has_structured_fields,
+        len(sanitized_n),
+        len(query_markers),
+        long_and_repetitive,
+        heavily_changed,
+        noisy_symbols,
+        lacks_query_focus,
+    )
+    if isinstance(s_result, (bool, np.bool_)):
+        return bool(s_result)
+    if isinstance(s_result, (int, np.integer)):
+        return bool(int(s_result))
+
     return long_and_repetitive or heavily_changed or noisy_symbols or lacks_query_focus or too_short_after_clean
 
 
@@ -363,6 +448,15 @@ def _load_dataset_answer_map(meta: dict) -> dict[str, str]:
     return answer_map
 
 
+def _build_dataset_canonical_answer_map(answer_map: dict[str, str]) -> dict[str, str]:
+    canonical: dict[str, str] = {}
+    for key, value in answer_map.items():
+        ckey = _canonicalize_lookup_query(key)
+        if ckey and ckey not in canonical:
+            canonical[ckey] = value
+    return canonical
+
+
 def _build_s_arch_tokenizer(meta: dict) -> CharTokenizer:
     """Build tokenizer for S-arch serving using dataset texts when available.
 
@@ -411,22 +505,153 @@ def _build_s_arch_tokenizer(meta: dict) -> CharTokenizer:
     return CharTokenizer.from_texts(seed_texts + sampled_texts)
 
 
-def _lookup_dataset_answer(query: str) -> str | None:
+def _lookup_dataset_answer_with_meta(query: str, min_confidence: float | None = None) -> tuple[str | None, dict]:
     answer_map = state.dataset_answer_map or {}
+    canonical_map = state.dataset_canonical_answer_map or {}
     normalized_query = _normalize_query(query)
     if not normalized_query:
-        return None
+        return None, {"match_type": "none", "score": 0.0, "threshold": None, "query_len": 0}
 
-    if normalized_query in answer_map:
-        return answer_map[normalized_query]
+    canonical_query = _canonicalize_lookup_query(normalized_query)
+    query_candidates = [normalized_query]
+    if canonical_query and canonical_query != normalized_query:
+        query_candidates.append(canonical_query)
+
+    for q in query_candidates:
+        if q in answer_map:
+            return answer_map[q], {"match_type": "exact", "score": 1.0, "threshold": None, "query_len": len(normalized_query)}
+        if q in canonical_map:
+            return canonical_map[q], {"match_type": "canonical", "score": 1.0, "threshold": None, "query_len": len(normalized_query)}
 
     for line in reversed(query.splitlines()):
         normalized_line = _normalize_query(line)
+        canonical_line = _canonicalize_lookup_query(normalized_line)
         if normalized_line.startswith("["):
             continue
         if normalized_line in answer_map:
-            return answer_map[normalized_line]
-    return None
+            return answer_map[normalized_line], {"match_type": "line_exact", "score": 1.0, "threshold": None, "query_len": len(normalized_query)}
+        if canonical_line in answer_map:
+            return answer_map[canonical_line], {"match_type": "line_canonical", "score": 1.0, "threshold": None, "query_len": len(normalized_query)}
+        if canonical_line in canonical_map:
+            return canonical_map[canonical_line], {"match_type": "line_canonical_map", "score": 1.0, "threshold": None, "query_len": len(normalized_query)}
+
+    # Fuzzy fallback for near-equivalent wording, mainly for short factual queries.
+    if len(normalized_query) <= 96 and answer_map:
+        def _bigrams(s: str) -> set[str]:
+            if len(s) < 2:
+                return {s} if s else set()
+            return {s[i:i+2] for i in range(len(s) - 1)}
+
+        best_key = None
+        best_score = 0.0
+        for query_key in query_candidates:
+            qset = _bigrams(query_key)
+            for key in answer_map.keys():
+                if abs(len(key) - len(query_key)) > 28:
+                    continue
+                kset = _bigrams(key)
+                union = len(qset | kset)
+                if union == 0:
+                    continue
+                jaccard = len(qset & kset) / union
+                contains_bonus = 0.06 if (key in query_key or query_key in key) else 0.0
+                prefix_bonus = 0.03 if key[:6] == query_key[:6] else 0.0
+                length_penalty = min(0.08, abs(len(key) - len(query_key)) / 220.0)
+                score = max(0.0, min(1.0, jaccard + contains_bonus + prefix_bonus - length_penalty))
+                if score > best_score:
+                    best_score = score
+                    best_key = key
+
+        base_threshold = _get_dataset_match_min_conf()
+        adaptive_threshold = base_threshold
+        qlen = len(canonical_query) if canonical_query else len(normalized_query)
+        if qlen <= 8:
+            adaptive_threshold = max(adaptive_threshold, 0.84)
+        elif qlen <= 16:
+            adaptive_threshold = max(adaptive_threshold, 0.72)
+        elif qlen <= 32:
+            adaptive_threshold = max(adaptive_threshold, 0.64)
+
+        required_threshold = adaptive_threshold
+        if min_confidence is not None:
+            required_threshold = max(required_threshold, float(min_confidence))
+
+        if best_key is not None and best_score >= required_threshold:
+            return answer_map.get(best_key), {
+                "match_type": "fuzzy",
+                "score": round(float(best_score), 4),
+                "threshold": round(float(required_threshold), 4),
+                "query_len": len(normalized_query),
+            }
+    return None, {"match_type": "none", "score": 0.0, "threshold": None, "query_len": len(normalized_query)}
+
+
+def _lookup_dataset_answer(query: str, min_confidence: float | None = None) -> str | None:
+    answer, _meta = _lookup_dataset_answer_with_meta(query, min_confidence=min_confidence)
+    return answer
+
+
+def _read_env_conf_meta(name: str, default: float) -> dict:
+    raw = os.getenv(name)
+    used_default = False
+    parsed = None
+
+    if raw is None:
+        used_default = True
+        parsed = default
+    else:
+        try:
+            parsed = float(raw)
+        except ValueError:
+            used_default = True
+            parsed = default
+
+    clamped = max(0.0, min(1.0, parsed))
+    return {
+        "raw": raw,
+        "value": clamped,
+        "used_default": used_default,
+        "was_clamped": clamped != parsed,
+    }
+
+
+def _read_env_conf_float(name: str, default: float) -> float:
+    return _read_env_conf_meta(name, default)["value"]
+
+
+def _get_high_conf_min_conf() -> float:
+    return _read_env_conf_float("LLM_DATASET_HIGH_CONF_MIN_CONF", 0.82)
+
+
+def _get_dataset_match_min_conf() -> float:
+    return _read_env_conf_float("LLM_DATASET_MATCH_MIN_CONF", 0.58)
+
+
+def _get_retrieval_config_status() -> dict:
+    high_conf = _read_env_conf_meta("LLM_DATASET_HIGH_CONF_MIN_CONF", 0.82)
+    match_conf = _read_env_conf_meta("LLM_DATASET_MATCH_MIN_CONF", 0.58)
+    return {
+        "high_conf_min_conf": high_conf["value"],
+        "match_min_conf": match_conf["value"],
+        "high_conf_min_conf_raw": high_conf["raw"],
+        "match_min_conf_raw": match_conf["raw"],
+        "high_conf_min_conf_used_default": high_conf["used_default"],
+        "match_min_conf_used_default": match_conf["used_default"],
+        "high_conf_min_conf_was_clamped": high_conf["was_clamped"],
+        "match_min_conf_was_clamped": match_conf["was_clamped"],
+    }
+
+
+def _bump_retrieval_stat(key: str) -> None:
+    state.retrieval_stats[key] = int(state.retrieval_stats.get(key, 0)) + 1
+
+
+def _record_dataset_hit(endpoint: str, phase: str, match_type: str | None) -> None:
+    safe_match = match_type or "unknown"
+    _bump_retrieval_stat("dataset_hit_total")
+    _bump_retrieval_stat(f"dataset_hit_endpoint.{endpoint}")
+    _bump_retrieval_stat(f"dataset_hit_phase.{endpoint}.{phase}")
+    _bump_retrieval_stat(f"dataset_hit_match.{safe_match}")
 
 
 def _try_read_s_arch_meta_for_startup() -> dict | None:
@@ -539,6 +764,7 @@ def _init_fallback_model():
     state.active_source = "fallback"
     state.active_s_arch_meta = None
     state.dataset_answer_map = None
+    state.dataset_canonical_answer_map = None
 
 
 def _init_from_s_arch(meta: dict) -> bool:
@@ -557,6 +783,7 @@ def _init_from_s_arch(meta: dict) -> bool:
     state.active_source = "s_arch"
     state.active_s_arch_meta = meta
     state.dataset_answer_map = _load_dataset_answer_map(meta)
+    state.dataset_canonical_answer_map = _build_dataset_canonical_answer_map(state.dataset_answer_map)
     return True
 
 
@@ -620,6 +847,8 @@ def _load_or_init():
         state.tokenizer = tok
         state.active_source = "pickle"
         state.active_s_arch_meta = None
+        state.dataset_answer_map = None
+        state.dataset_canonical_answer_map = None
     except Exception as exc:
         logger.warning("加载 checkpoint 失败，回退到随机初始化: %s", exc)
         _init_fallback_model()
@@ -646,11 +875,6 @@ def _make_dataset_answer_response(answer: str, model_name: str) -> dict:
             "total_tokens": answer_tokens * 2,
         },
     }
-
-
-@app.on_event("startup")
-def startup_event():
-    _load_or_init()
 
 
 @app.get("/health")
@@ -706,6 +930,7 @@ def model_status():
         "llm_checkpoint_exists": os.path.exists(llm_checkpoint),
         "model_vocab_size": model_vocab_size,
         "model_max_seq_len": model_max_seq_len,
+        "retrieval_config": _get_retrieval_config_status(),
         "s_arch": s_arch,
     }
 
@@ -714,6 +939,17 @@ def model_status():
 def get_s_arch_meta():
     """Expose current pure-S checkpoint metadata for frontend/runtime integration."""
     return _read_s_arch_meta()
+
+
+@app.get("/v1/retrieval-status")
+def retrieval_status():
+    return {
+        "service": "neurx-model-core",
+        "active_source": state.active_source,
+        "retrieval_config": _get_retrieval_config_status(),
+        "retrieval_stats": dict(state.retrieval_stats),
+        "timestamp": int(time.time()),
+    }
 
 
 @app.get("/v1/s-arch/download")
@@ -828,13 +1064,40 @@ def generate(req: GenerateRequest):
         raise HTTPException(status_code=503, detail="model not ready")
 
     sanitized_prompt = _sanitize_user_query(req.prompt)
+    high_conf_min_conf = _get_high_conf_min_conf()
+
+    # High-confidence retrieval first to avoid over-blocking good queries.
+    dataset_answer, match_meta = _lookup_dataset_answer_with_meta(
+        sanitized_prompt,
+        min_confidence=high_conf_min_conf,
+    )
+    if dataset_answer is not None:
+        _record_dataset_hit("generate", "high_conf", match_meta.get("match_type"))
+        logger.info(
+            "dataset_hit endpoint=/v1/generate phase=high_conf match=%s score=%s threshold=%s qlen=%s",
+            match_meta.get("match_type"),
+            match_meta.get("score"),
+            match_meta.get("threshold"),
+            match_meta.get("query_len"),
+        )
+        return GenerateResponse(text=dataset_answer)
 
     # Strict mode: noisy inputs always go to clarification, never free generation.
     if _is_low_quality_query(req.prompt, sanitized_prompt):
+        _bump_retrieval_stat("clarification_total")
+        _bump_retrieval_stat("clarification_endpoint.generate")
         return GenerateResponse(text=_clarification_text())
 
-    dataset_answer = _lookup_dataset_answer(sanitized_prompt)
+    dataset_answer, match_meta = _lookup_dataset_answer_with_meta(sanitized_prompt)
     if dataset_answer is not None:
+        _record_dataset_hit("generate", "normal", match_meta.get("match_type"))
+        logger.info(
+            "dataset_hit endpoint=/v1/generate phase=normal match=%s score=%s threshold=%s qlen=%s",
+            match_meta.get("match_type"),
+            match_meta.get("score"),
+            match_meta.get("threshold"),
+            match_meta.get("query_len"),
+        )
         return GenerateResponse(text=dataset_answer)
 
     sampling_cfg = SamplingConfig(
@@ -858,6 +1121,8 @@ def generate(req: GenerateRequest):
     if text.startswith(sanitized_prompt):
         text = text[len(sanitized_prompt):]
 
+    _bump_retrieval_stat("generation_total")
+    _bump_retrieval_stat("generation_endpoint.generate")
     return GenerateResponse(text=text)
 
 
@@ -879,13 +1144,40 @@ def chat_completions(req: ChatCompletionsRequest):
 
     user_query = req.messages[-1].content
     sanitized_user_query = _sanitize_user_query(user_query)
+    high_conf_min_conf = _get_high_conf_min_conf()
+
+    # High-confidence retrieval first to avoid over-blocking good queries.
+    dataset_answer, match_meta = _lookup_dataset_answer_with_meta(
+        sanitized_user_query,
+        min_confidence=high_conf_min_conf,
+    )
+    if dataset_answer is not None:
+        _record_dataset_hit("chat", "high_conf", match_meta.get("match_type"))
+        logger.info(
+            "dataset_hit endpoint=/v1/chat/completions phase=high_conf match=%s score=%s threshold=%s qlen=%s",
+            match_meta.get("match_type"),
+            match_meta.get("score"),
+            match_meta.get("threshold"),
+            match_meta.get("query_len"),
+        )
+        return _make_dataset_answer_response(dataset_answer, req.model)
 
     # Strict mode: noisy inputs always go to clarification, never free generation.
     if _is_low_quality_query(user_query, sanitized_user_query):
+        _bump_retrieval_stat("clarification_total")
+        _bump_retrieval_stat("clarification_endpoint.chat")
         return _make_dataset_answer_response(_clarification_text(), req.model)
 
-    dataset_answer = _lookup_dataset_answer(sanitized_user_query)
+    dataset_answer, match_meta = _lookup_dataset_answer_with_meta(sanitized_user_query)
     if dataset_answer is not None:
+        _record_dataset_hit("chat", "normal", match_meta.get("match_type"))
+        logger.info(
+            "dataset_hit endpoint=/v1/chat/completions phase=normal match=%s score=%s threshold=%s qlen=%s",
+            match_meta.get("match_type"),
+            match_meta.get("score"),
+            match_meta.get("threshold"),
+            match_meta.get("query_len"),
+        )
         return _make_dataset_answer_response(dataset_answer, req.model)
 
     prompt_messages = req.messages[:-1] + [ChatMessage(role="user", content=sanitized_user_query)]
@@ -909,6 +1201,8 @@ def chat_completions(req: ChatCompletionsRequest):
     usage_completion_tokens = max(0, usage_total_tokens - usage_prompt_tokens)
     created = int(time.time())
 
+    _bump_retrieval_stat("generation_total")
+    _bump_retrieval_stat("generation_endpoint.chat")
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
         "object": "chat.completion",

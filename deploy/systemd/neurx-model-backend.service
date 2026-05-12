@@ -8,9 +8,9 @@ User=root
 WorkingDirectory=/app/neurx-model
 Environment=PYTHONPATH=/app/neurx-model
 Environment=LLM_LOAD_MODE=s_arch
-Environment=LLM_S_ARCH_META=/app/neurx-model/checkpoints/s_arch_latest.json
+Environment=NEURX_S_ARCH_META=/app/neurx-model/checkpoints/s_arch_latest.json
 Environment=LLM_CHECKPOINT=/app/neurx-model/checkpoints/model_core.pkl
-ExecStart=/app/neurx-model/venv/bin/python -m uvicorn app.api.serve:app --host 127.0.0.1 --port 8000
+ExecStart=/app/neurx-model/venv/bin/python -m uvicorn app.api.serve_core:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5
 

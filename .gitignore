@@ -44,6 +44,8 @@ logs/
 *.log
 training.log
 *.pid
+reports/s_train_*/
+reports/s_train_latest
 
 # Data
 data/

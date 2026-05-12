@@ -1,0 +1,18 @@
+{
+  "bundle_root": "/app/neurx-model/reports/s_train_20260512100813",
+  "run_ts": "20260512100813",
+  "dataset": {
+    "file": "/app/neurx-model/dataset/text/Neurx-SFT-Text-v1.finalclean.train.jsonl",
+    "sha256": "04e45defa39fea7034f17f9c073fc5d9c38d950838186f343b035a452d38d63a",
+    "line_count": 1410,
+    "byte_count": 351090
+  },
+  "entries": {
+    "train_bin": "/app/neurx-model/reports/s_train_20260512100813/bin/train_loop.bin",
+    "ops_bin": "/app/neurx-model/reports/s_train_20260512100813/bin/ops.bin",
+    "model_bin": "/app/neurx-model/reports/s_train_20260512100813/bin/gpt_model_ops.bin",
+    "train_ir": "/app/neurx-model/reports/s_train_20260512100813/ir/train/loop.ir",
+    "ops_ir": "/app/neurx-model/reports/s_train_20260512100813/ir/ops.ir",
+    "model_ir": "/app/neurx-model/reports/s_train_20260512100813/ir/model/gpt_model_ops.ir"
+  }
+}

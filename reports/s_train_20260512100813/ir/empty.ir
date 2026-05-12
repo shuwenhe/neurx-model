@@ -1,0 +1,12 @@
+SSEED-TARGET-V1
+MOV|example|0|_
+FUNC_BEGIN|add_one|_|_
+PARAM|value|_|_
+ADD|t0|value|1
+RET|t0|_|_
+FUNC_END|add_one|_|_
+FUNC_BEGIN|double_value|_|_
+PARAM|value|_|_
+MUL|t1|value|2
+RET|t1|_|_
+FUNC_END|double_value|_|_

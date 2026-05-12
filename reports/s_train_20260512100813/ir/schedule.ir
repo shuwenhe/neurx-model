@@ -1,0 +1,9 @@
+SSEED-TARGET-V1
+MOV|op|0|_
+MOV|scheduler|0|_
+FUNC_BEGIN|run|_|_
+PARAM|op_item|_|_
+ARG|"schedule.run: "|_|_
+ARG|op_item.name|_|_
+CALL|t0|println|2
+FUNC_END|run|_|_

@@ -303,10 +303,15 @@ def _is_low_quality_query(original: str, sanitized: str) -> bool:
         return True
 
     unique_ratio = len(set(original_n)) / max(1, len(original_n))
-    long_and_repetitive = len(original_n) >= 80 and unique_ratio < 0.36
-    heavily_changed = len(original_n) >= 60 and len(sanitized_n) <= int(len(original_n) * 0.45)
+    non_word_ratio = len(re.findall(r"[^\u4e00-\u9fffA-Za-z0-9]", original_n)) / max(1, len(original_n))
+    query_markers = re.findall(r"为什么|怎么|如何|什么|请|是否|能否|吗|\?|？", sanitized_n)
+
+    long_and_repetitive = len(original_n) >= 60 and unique_ratio < 0.42
+    heavily_changed = len(original_n) >= 50 and len(sanitized_n) <= int(len(original_n) * 0.55)
+    noisy_symbols = len(original_n) >= 40 and non_word_ratio > 0.18
+    lacks_query_focus = len(original_n) >= 45 and len(query_markers) == 0
     too_short_after_clean = len(sanitized_n) < 3
-    return long_and_repetitive or heavily_changed or too_short_after_clean
+    return long_and_repetitive or heavily_changed or noisy_symbols or lacks_query_focus or too_short_after_clean
 
 
 def _clarification_text() -> str:
@@ -823,12 +828,14 @@ def generate(req: GenerateRequest):
         raise HTTPException(status_code=503, detail="model not ready")
 
     sanitized_prompt = _sanitize_user_query(req.prompt)
+
+    # Strict mode: noisy inputs always go to clarification, never free generation.
+    if _is_low_quality_query(req.prompt, sanitized_prompt):
+        return GenerateResponse(text=_clarification_text())
+
     dataset_answer = _lookup_dataset_answer(sanitized_prompt)
     if dataset_answer is not None:
         return GenerateResponse(text=dataset_answer)
-
-    if _is_low_quality_query(req.prompt, sanitized_prompt):
-        return GenerateResponse(text=_clarification_text())
 
     sampling_cfg = SamplingConfig(
         temperature=req.temperature,
@@ -872,12 +879,14 @@ def chat_completions(req: ChatCompletionsRequest):
 
     user_query = req.messages[-1].content
     sanitized_user_query = _sanitize_user_query(user_query)
+
+    # Strict mode: noisy inputs always go to clarification, never free generation.
+    if _is_low_quality_query(user_query, sanitized_user_query):
+        return _make_dataset_answer_response(_clarification_text(), req.model)
+
     dataset_answer = _lookup_dataset_answer(sanitized_user_query)
     if dataset_answer is not None:
         return _make_dataset_answer_response(dataset_answer, req.model)
-
-    if _is_low_quality_query(user_query, sanitized_user_query):
-        return _make_dataset_answer_response(_clarification_text(), req.model)
 
     prompt_messages = req.messages[:-1] + [ChatMessage(role="user", content=sanitized_user_query)]
 

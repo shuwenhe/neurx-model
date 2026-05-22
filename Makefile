@@ -368,6 +368,13 @@ logs:
 		echo "logs/backend.out 不存在"; \
 	fi
 	@echo ""
+	@echo "== backend trace lines (from file) =="
+	@if [ -f logs/backend.out ]; then \
+		grep -E 'trace event=|dataset_hit|qwen upstream' logs/backend.out | tail -n 80 || true; \
+	else \
+		echo "logs/backend.out 不存在"; \
+	fi
+	@echo ""
 	@echo "== systemd status (neurx-model-backend.service) =="
 	@if command -v systemctl >/dev/null 2>&1; then \
 		systemctl --no-pager --lines=40 status neurx-model-backend.service || true; \
@@ -389,6 +396,26 @@ logs:
 		echo "journalctl 不可用"; \
 	fi
 	@echo ""
+	@echo "== backend trace lines (from journal) =="
+	@if command -v journalctl >/dev/null 2>&1; then \
+		journalctl -u neurx-model-backend.service -n 400 --no-pager | grep -E 'trace event=|dataset_hit|qwen upstream' | tail -n 100 || true; \
+	else \
+		echo "journalctl 不可用"; \
+	fi
+	@echo ""
+	@echo "== qwen model container trace logs (last 80 lines) =="
+	@if command -v docker >/dev/null 2>&1; then \
+		if docker ps -a --format '{{.Names}}' | grep -qx 'qwen25-vl-7b-npu-api'; then \
+			docker logs --tail 80 qwen25-vl-7b-npu-api 2>&1 | grep -E 'trace event=|ERROR|POST /v1/chat/completions|POST /v1/completions' || true; \
+		elif docker ps -a --format '{{.Names}}' | grep -qx 'qwen25-vl-7b-cpu-api'; then \
+			docker logs --tail 80 qwen25-vl-7b-cpu-api 2>&1 | grep -E 'trace event=|ERROR|POST /v1/chat/completions|POST /v1/completions' || true; \
+		else \
+			echo 'qwen model container 未运行'; \
+		fi; \
+	else \
+		echo 'docker 不可用'; \
+	fi
+	@echo ""
 	@echo "== nginx access (frontend + api via :8080, last 80 lines) =="
 	@if [ -f /var/log/nginx/access.log ]; then \
 		tail -n 80 /var/log/nginx/access.log; \
@@ -407,9 +434,9 @@ logs:
 logs-follow:
 	@echo "等待前端请求中（Ctrl+C 退出）..."
 	@if command -v journalctl >/dev/null 2>&1; then \
-		journalctl -u neurx-model-backend.service -f --no-pager | grep --line-buffered -E '"(GET|POST|PUT|DELETE) /'; \
+		journalctl -u neurx-model-backend.service -f --no-pager | grep --line-buffered -E '"(GET|POST|PUT|DELETE) /|trace event=|dataset_hit|qwen upstream'; \
 	elif [ -f logs/backend.out ]; then \
-		tail -f logs/backend.out | grep --line-buffered -E '"(GET|POST|PUT|DELETE) /'; \
+		tail -f logs/backend.out | grep --line-buffered -E '"(GET|POST|PUT|DELETE) /|trace event=|dataset_hit|qwen upstream'; \
 	else \
 		echo "journalctl 不可用且 logs/backend.out 不存在"; \
 		exit 1; \

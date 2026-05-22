@@ -10,6 +10,10 @@ Environment=PYTHONPATH=/app/neurx-model
 Environment=LLM_LOAD_MODE=s_arch
 Environment=NEURX_S_ARCH_META=/app/neurx-model/checkpoints/s_arch_latest.json
 Environment=LLM_CHECKPOINT=/app/neurx-model/checkpoints/model_core.pkl
+Environment=LLM_UPSTREAM_MODE=qwen25_vl
+Environment=LLM_QWEN_VL_BASE_URL=http://127.0.0.1:8004
+Environment=LLM_QWEN_VL_MODEL_ID=Qwen2.5-VL-7B
+Environment=LLM_QWEN_TIMEOUT_SECONDS=6
 ExecStart=/app/neurx-model/venv/bin/python -m uvicorn app.api.serve_core:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5

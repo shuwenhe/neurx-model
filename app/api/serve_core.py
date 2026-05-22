@@ -1,19 +1,25 @@
 """自研后端 API 主链路（纯 numpy）"""
 
+import base64
+import inspect
 import logging
 import os
 import pickle
+import socket
 import time
 import uuid
 import json
 import hashlib
 import re
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -239,7 +245,194 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
+logger.setLevel(getattr(logging, os.getenv("LLM_LOG_LEVEL", "INFO").upper(), logging.INFO))
+
+
+def _caller_code_ref(depth: int = 1) -> str:
+    frame = inspect.currentframe()
+    try:
+        for _ in range(depth):
+            if frame is None:
+                break
+            frame = frame.f_back
+        if frame is None:
+            return "unknown"
+        return f"{Path(frame.f_code.co_filename).name}:{frame.f_lineno}"
+    finally:
+        del frame
+
+
+def _format_log_value(value: Any, limit: int = 180) -> str:
+    if isinstance(value, str):
+        text = value.replace("\n", "\\n")
+    elif isinstance(value, (int, float, bool)) or value is None:
+        text = str(value)
+    else:
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if len(text) > limit:
+        return f"{text[:limit]}..."
+    return text
+
+
+def _trace_log(event: str, **fields: Any) -> None:
+    parts = [f"{key}={_format_log_value(value)}" for key, value in fields.items() if value is not None]
+    message = f"trace event={event} code={_caller_code_ref(depth=2)}"
+    if parts:
+        message = f"{message} {' '.join(parts)}"
+    logger.info(message)
+
+
+def _use_qwen_vl_proxy() -> bool:
+    mode = os.getenv("LLM_UPSTREAM_MODE", "").strip().lower()
+    return mode in {"qwen25_vl", "qwen-vl", "qwen2.5-vl-7b"}
+
+
+def _qwen_vl_base_url() -> str:
+    return os.getenv("LLM_QWEN_VL_BASE_URL", "http://127.0.0.1:8004").rstrip("/")
+
+
+def _qwen_vl_model_id() -> str:
+    return os.getenv("LLM_QWEN_VL_MODEL_ID", "Qwen2.5-VL-7B").strip() or "Qwen2.5-VL-7B"
+
+
+def _qwen_timeout_seconds() -> int:
+    raw = os.getenv("LLM_QWEN_TIMEOUT_SECONDS", "6").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 6
+    return max(2, value)
+
+
+def _qwen_http_json(method: str, url: str, payload: dict | None = None, extra_headers: dict[str, str] | None = None) -> dict:
+    body = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    if extra_headers:
+        headers.update(extra_headers)
+
+    req = urllib.request.Request(url=url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=_qwen_timeout_seconds()) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=502, detail=f"qwen upstream http error: {exc.code} {detail}") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise HTTPException(status_code=502, detail="qwen upstream timeout") from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=502, detail=f"qwen upstream unavailable: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="qwen upstream returned non-json response") from exc
+
+
+def _qwen_upstream_model_ids() -> list[str]:
+    base_url = _qwen_vl_base_url()
+    data = _qwen_http_json("GET", f"{base_url}/v1/models")
+    models = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(models, list):
+        return []
+    ids: list[str] = []
+    for item in models:
+        if isinstance(item, dict):
+            mid = item.get("id")
+            if isinstance(mid, str) and mid.strip():
+                ids.append(mid.strip())
+    return ids
+
+
+def _extract_qwen_text(response_payload: dict) -> str:
+    choices = response_payload.get("choices") if isinstance(response_payload, dict) else None
+    if not isinstance(choices, list) or not choices:
+        raise HTTPException(status_code=502, detail="qwen upstream returned empty choices")
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    message = first.get("message") if isinstance(first.get("message"), dict) else {}
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(first.get("text"), str):
+        return first["text"]
+    return ""
+
+
+def _qwen_chat_completion(
+    messages: list[dict],
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    trace_id: str | None = None,
+) -> tuple[dict, str]:
+    base_url = _qwen_vl_base_url()
+    preferred_model = _qwen_vl_model_id()
+    chat_url = f"{base_url}/v1/chat/completions"
+    payload = {
+        "model": preferred_model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
+    }
+    extra_headers = {"X-Neurx-Trace-Id": trace_id or ""}
+
+    _trace_log(
+        "qwen_proxy_request",
+        trace_id=trace_id,
+        upstream=chat_url,
+        model=preferred_model,
+        message_count=len(messages),
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+    )
+
+    try:
+        response = _qwen_http_json("POST", chat_url, payload, extra_headers=extra_headers)
+        usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+        _trace_log(
+            "qwen_proxy_response",
+            trace_id=trace_id,
+            model=preferred_model,
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+            total_tokens=usage.get("total_tokens"),
+        )
+        return response, preferred_model
+    except HTTPException as exc:
+        if "unknown model" not in str(exc.detail):
+            raise
+
+    upstream_ids = _qwen_upstream_model_ids()
+    if not upstream_ids:
+        raise HTTPException(status_code=502, detail="qwen upstream has no available model ids")
+
+    fallback_model = upstream_ids[0]
+    payload["model"] = fallback_model
+    _trace_log("qwen_proxy_model_fallback", trace_id=trace_id, preferred_model=preferred_model, fallback_model=fallback_model)
+    response = _qwen_http_json("POST", chat_url, payload, extra_headers=extra_headers)
+    usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+    _trace_log(
+        "qwen_proxy_response",
+        trace_id=trace_id,
+        model=fallback_model,
+        prompt_tokens=usage.get("prompt_tokens"),
+        completion_tokens=usage.get("completion_tokens"),
+        total_tokens=usage.get("total_tokens"),
+    )
+    return response, fallback_model
+
+
+def _image_to_data_url(image: UploadFile) -> str:
+    image_bytes = image.file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="empty image payload")
+
+    mime = image.content_type or "application/octet-stream"
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 def _read_s_arch_meta() -> dict:
@@ -879,11 +1072,38 @@ def _make_dataset_answer_response(answer: str, model_name: str) -> dict:
 
 @app.get("/health")
 def health():
+    if _use_qwen_vl_proxy():
+        return {
+            "status": "ok",
+            "backend": "qwen25_vl_proxy",
+            "upstream": _qwen_vl_base_url(),
+            "model": _qwen_vl_model_id(),
+        }
     return {"status": "ok", "backend": "core"}
 
 
 @app.get("/v1/models")
 def list_models():
+    if _use_qwen_vl_proxy():
+        configured = _qwen_vl_model_id()
+        try:
+            upstream_ids = _qwen_upstream_model_ids()
+        except HTTPException:
+            upstream_ids = []
+        model_ids = upstream_ids or [configured]
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": model_id,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "self-hosted-qwen-vl",
+                }
+                for model_id in model_ids
+            ],
+        }
+
     return {
         "object": "list",
         "data": [
@@ -1058,8 +1278,60 @@ def _generate_ids(
     return ids, state.tokenizer.decode(ids).replace("<unk>", "")
 
 
+def _generate_local_text(prompt: str, max_new_tokens: int, temperature: float, top_p: float, top_k: int | None = 40) -> str:
+    if state.model is None or state.tokenizer is None:
+        raise HTTPException(status_code=503, detail="model not ready")
+
+    sampling_cfg = SamplingConfig(
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        repetition_penalty=1.08,
+        seed=None,
+    )
+    sampling_cfg.validate()
+
+    prompt_ids = state.tokenizer.encode(prompt)
+    if not prompt_ids:
+        prompt_ids = [0]
+
+    _, text = _generate_ids(
+        initial_ids=prompt_ids,
+        max_new_tokens=max_new_tokens,
+        sampling_cfg=sampling_cfg,
+        stop_sequences=[],
+    )
+    if text.startswith(prompt):
+        text = text[len(prompt):]
+    return text
+
+
 @app.post("/v1/generate", response_model=GenerateResponse)
 def generate(req: GenerateRequest):
+    trace_id = uuid.uuid4().hex[:12]
+    _trace_log(
+        "backend_request",
+        trace_id=trace_id,
+        endpoint="/v1/generate",
+        upstream_mode=os.getenv("LLM_UPSTREAM_MODE", ""),
+        prompt_len=len(req.prompt),
+        temperature=req.temperature,
+        top_p=req.top_p,
+    )
+    if _use_qwen_vl_proxy():
+        prompt = _sanitize_user_query(req.prompt)
+        try:
+            upstream_payload, _ = _qwen_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=req.max_new_tokens,
+                temperature=req.temperature,
+                top_p=req.top_p,
+                trace_id=trace_id,
+            )
+            return GenerateResponse(text=_extract_qwen_text(upstream_payload))
+        except HTTPException as exc:
+            logger.warning("qwen upstream generate failed, fallback to local model: %s", exc.detail)
+
     if state.model is None or state.tokenizer is None:
         raise HTTPException(status_code=503, detail="model not ready")
 
@@ -1126,8 +1398,129 @@ def generate(req: GenerateRequest):
     return GenerateResponse(text=text)
 
 
+@app.post("/v1/generate-multipart")
+def generate_multipart(
+    prompt: str = Form(...),
+    max_new_tokens: int = Form(128),
+    temperature: float = Form(0.6),
+    top_p: float = Form(0.85),
+    image: UploadFile | None = File(None),
+):
+    trace_id = uuid.uuid4().hex[:12]
+    _trace_log(
+        "backend_request",
+        trace_id=trace_id,
+        endpoint="/v1/generate-multipart",
+        upstream_mode=os.getenv("LLM_UPSTREAM_MODE", ""),
+        prompt_len=len(prompt),
+        has_image=image is not None,
+        temperature=temperature,
+        top_p=top_p,
+    )
+    if not _use_qwen_vl_proxy():
+        raise HTTPException(status_code=400, detail="multipart is available only when qwen vl proxy mode is enabled")
+
+    sanitized_prompt = _sanitize_user_query(prompt)
+    try:
+        if image is None:
+            upstream_payload, _ = _qwen_chat_completion(
+                messages=[{"role": "user", "content": sanitized_prompt}],
+                max_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                trace_id=trace_id,
+            )
+        else:
+            image_data_url = _image_to_data_url(image)
+            upstream_payload, _ = _qwen_chat_completion(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": sanitized_prompt or "请描述这张图片"},
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                        ],
+                    }
+                ],
+                max_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                trace_id=trace_id,
+            )
+
+        text = _extract_qwen_text(upstream_payload)
+        return {
+            "text": text,
+            "session_id": f"sess-{uuid.uuid4().hex[:12]}",
+        }
+    except HTTPException as exc:
+        logger.warning("qwen upstream multipart failed: %s", exc.detail)
+        if image is not None:
+            return {
+                "text": "当前视觉模型服务不可用，请稍后重试或先发送纯文本问题。",
+                "session_id": f"sess-{uuid.uuid4().hex[:12]}",
+            }
+        local_text = _generate_local_text(
+            prompt=sanitized_prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
+        return {
+            "text": local_text,
+            "session_id": f"sess-{uuid.uuid4().hex[:12]}",
+        }
+
+
 @app.post("/v1/chat/completions")
 def chat_completions(req: ChatCompletionsRequest):
+    trace_id = uuid.uuid4().hex[:12]
+    _trace_log(
+        "backend_request",
+        trace_id=trace_id,
+        endpoint="/v1/chat/completions",
+        upstream_mode=os.getenv("LLM_UPSTREAM_MODE", ""),
+        message_count=len(req.messages),
+        model=req.model,
+        temperature=req.temperature,
+        top_p=req.top_p,
+    )
+    if _use_qwen_vl_proxy():
+        if req.stream:
+            raise HTTPException(status_code=400, detail="stream=true is not supported yet")
+
+        try:
+            upstream_messages = [{"role": m.role, "content": m.content} for m in req.messages]
+            upstream_payload, used_model = _qwen_chat_completion(
+                messages=upstream_messages,
+                max_tokens=req.max_tokens,
+                temperature=req.temperature,
+                top_p=req.top_p,
+                trace_id=trace_id,
+            )
+            answer = _extract_qwen_text(upstream_payload)
+            usage = upstream_payload.get("usage") if isinstance(upstream_payload.get("usage"), dict) else {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+            return {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": used_model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": answer},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": usage,
+            }
+        except HTTPException as exc:
+            logger.warning("qwen upstream chat failed, fallback to local model: %s", exc.detail)
+
     if req.stream:
         raise HTTPException(status_code=400, detail="stream=true is not supported yet")
     if state.model is None or state.tokenizer is None:

@@ -1,3 +1,5 @@
+import pytest
+
 from app.api import serve_core
 
 
@@ -46,6 +48,20 @@ def test_generate_low_quality_short_circuits_normal_lookup(monkeypatch):
     res = serve_core.generate(serve_core.GenerateRequest(prompt="啊"))
     assert res.text == serve_core._clarification_text()
     assert calls == [0.82]
+
+
+def test_low_quality_query_allows_noisy_question_with_clear_focus():
+    prompt = "错误日志 ###@@@ /tmp/main.cpp:42 std::bad_alloc !!!!! 为什么总是回复这个，应该怎么处理？"
+    sanitized = serve_core._sanitize_user_query(prompt)
+
+    assert serve_core._is_low_quality_query(prompt, sanitized) is False
+
+
+def test_low_quality_query_keeps_blocking_repetitive_noise():
+    prompt = "为什么为什么为什么为什么为什么为什么为什么为什么为什么为什么????!!!!"
+    sanitized = serve_core._sanitize_user_query(prompt)
+
+    assert serve_core._is_low_quality_query(prompt, sanitized) is True
 
 
 def test_chat_high_conf_hit_returns_dataset_answer(monkeypatch):
@@ -252,3 +268,63 @@ def test_retrieval_status_counts_hits(monkeypatch):
     assert stats["dataset_hit_phase.chat.normal"] == 1
     assert stats["dataset_hit_match.exact"] == 1
     assert stats["dataset_hit_match.fuzzy"] == 1
+
+
+def test_chat_qwen_proxy_failure_returns_local_fallback_model_for_dataset_hit(monkeypatch):
+    _set_minimal_ready_state(monkeypatch)
+    monkeypatch.setattr(serve_core, "_use_qwen_vl_proxy", lambda: True)
+
+    def fail_upstream(**_kwargs):
+        raise serve_core.HTTPException(status_code=502, detail="qwen upstream timeout")
+
+    def fake_lookup(_query, min_confidence=None):
+        if min_confidence == 0.82:
+            return (
+                "中国的首都是北京。",
+                {"match_type": "exact", "score": 1.0, "threshold": None, "query_len": 7},
+            )
+        return (None, {"match_type": "none", "score": 0.0, "threshold": None, "query_len": 7})
+
+    monkeypatch.setattr(serve_core, "_qwen_chat_completion", fail_upstream)
+    monkeypatch.setattr(serve_core, "_lookup_dataset_answer_with_meta", fake_lookup)
+
+    req = serve_core.ChatCompletionsRequest(
+        model="Qwen2.5-VL-7B",
+        messages=[serve_core.ChatMessage(role="user", content="中国首都是哪里")],
+    )
+    res = serve_core.chat_completions(req)
+
+    assert res["model"] == "Qwen2.5-VL-7B-local-fallback"
+    assert res["choices"][0]["message"]["content"] == "中国的首都是北京。"
+
+
+def test_chat_qwen_proxy_failure_does_not_free_generate(monkeypatch):
+    _set_minimal_ready_state(monkeypatch)
+    monkeypatch.setattr(serve_core, "_use_qwen_vl_proxy", lambda: True)
+    monkeypatch.setattr(
+        serve_core,
+        "_qwen_chat_completion",
+        lambda **_kwargs: (_ for _ in ()).throw(serve_core.HTTPException(status_code=502, detail="qwen upstream timeout")),
+    )
+    monkeypatch.setattr(
+        serve_core,
+        "_lookup_dataset_answer_with_meta",
+        lambda *_args, **_kwargs: (None, {"match_type": "none", "score": 0.0, "threshold": None, "query_len": 10}),
+    )
+    monkeypatch.setattr(serve_core, "_is_low_quality_query", lambda *_args: False)
+
+    def should_not_generate(*_args, **_kwargs):
+        raise AssertionError("_generate_ids should not run when qwen proxy is unavailable")
+
+    monkeypatch.setattr(serve_core, "_generate_ids", should_not_generate)
+
+    req = serve_core.ChatCompletionsRequest(
+        model="Qwen2.5-VL-7B",
+        messages=[serve_core.ChatMessage(role="user", content="为什么总是回复这个")],
+    )
+
+    with pytest.raises(serve_core.HTTPException) as exc_info:
+        serve_core.chat_completions(req)
+
+    assert exc_info.value.status_code == 503
+    assert "qwen upstream unavailable" in str(exc_info.value.detail)

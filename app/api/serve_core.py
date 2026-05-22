@@ -564,6 +564,11 @@ def _is_low_quality_query(original: str, sanitized: str) -> bool:
     unique_ratio = len(set(original_n)) / max(1, len(original_n))
     non_word_ratio = len(re.findall(r"[^\u4e00-\u9fffA-Za-z0-9]", original_n)) / max(1, len(original_n))
     query_markers = re.findall(r"为什么|怎么|如何|什么|请|是否|能否|吗|\?|？", sanitized_n)
+    has_question_focus = len(query_markers) > 0
+    repetitive_question = (
+        len(original_n) >= 20
+        and any(sanitized_n.count(token) >= 3 for token in ("为什么", "怎么", "如何", "什么"))
+    )
 
     long_and_repetitive = len(original_n) >= 60 and unique_ratio < 0.42
     heavily_changed = (
@@ -588,6 +593,10 @@ def _is_low_quality_query(original: str, sanitized: str) -> bool:
         return bool(s_result)
     if isinstance(s_result, (int, np.integer)):
         return bool(int(s_result))
+
+    # Keep noisy pasted logs if they still contain a clear user question.
+    if has_question_focus and len(sanitized_n) >= 4:
+        return long_and_repetitive or repetitive_question or too_short_after_clean
 
     return long_and_repetitive or heavily_changed or noisy_symbols or lacks_query_focus or too_short_after_clean
 
@@ -1070,6 +1079,13 @@ def _make_dataset_answer_response(answer: str, model_name: str) -> dict:
     }
 
 
+def _local_fallback_model_name(requested_model: str) -> str:
+    requested = (requested_model or "").strip()
+    if not requested:
+        return "neurx-local-fallback"
+    return f"{requested}-local-fallback"
+
+
 @app.get("/health")
 def health():
     if _use_qwen_vl_proxy():
@@ -1309,6 +1325,7 @@ def _generate_local_text(prompt: str, max_new_tokens: int, temperature: float, t
 @app.post("/v1/generate", response_model=GenerateResponse)
 def generate(req: GenerateRequest):
     trace_id = uuid.uuid4().hex[:12]
+    qwen_proxy_error_detail = ""
     _trace_log(
         "backend_request",
         trace_id=trace_id,
@@ -1330,6 +1347,7 @@ def generate(req: GenerateRequest):
             )
             return GenerateResponse(text=_extract_qwen_text(upstream_payload))
         except HTTPException as exc:
+            qwen_proxy_error_detail = str(exc.detail)
             logger.warning("qwen upstream generate failed, fallback to local model: %s", exc.detail)
 
     if state.model is None or state.tokenizer is None:
@@ -1371,6 +1389,9 @@ def generate(req: GenerateRequest):
             match_meta.get("query_len"),
         )
         return GenerateResponse(text=dataset_answer)
+
+    if qwen_proxy_error_detail:
+        raise HTTPException(status_code=503, detail=f"qwen upstream unavailable: {qwen_proxy_error_detail}")
 
     sampling_cfg = SamplingConfig(
         temperature=req.temperature,
@@ -1475,6 +1496,7 @@ def generate_multipart(
 @app.post("/v1/chat/completions")
 def chat_completions(req: ChatCompletionsRequest):
     trace_id = uuid.uuid4().hex[:12]
+    qwen_proxy_error_detail = ""
     _trace_log(
         "backend_request",
         trace_id=trace_id,
@@ -1519,6 +1541,7 @@ def chat_completions(req: ChatCompletionsRequest):
                 "usage": usage,
             }
         except HTTPException as exc:
+            qwen_proxy_error_detail = str(exc.detail)
             logger.warning("qwen upstream chat failed, fallback to local model: %s", exc.detail)
 
     if req.stream:
@@ -1553,13 +1576,19 @@ def chat_completions(req: ChatCompletionsRequest):
             match_meta.get("threshold"),
             match_meta.get("query_len"),
         )
-        return _make_dataset_answer_response(dataset_answer, req.model)
+        return _make_dataset_answer_response(
+            dataset_answer,
+            _local_fallback_model_name(req.model) if qwen_proxy_error_detail else req.model,
+        )
 
     # Strict mode: noisy inputs always go to clarification, never free generation.
     if _is_low_quality_query(user_query, sanitized_user_query):
         _bump_retrieval_stat("clarification_total")
         _bump_retrieval_stat("clarification_endpoint.chat")
-        return _make_dataset_answer_response(_clarification_text(), req.model)
+        return _make_dataset_answer_response(
+            _clarification_text(),
+            _local_fallback_model_name(req.model) if qwen_proxy_error_detail else req.model,
+        )
 
     dataset_answer, match_meta = _lookup_dataset_answer_with_meta(sanitized_user_query)
     if dataset_answer is not None:
@@ -1571,7 +1600,13 @@ def chat_completions(req: ChatCompletionsRequest):
             match_meta.get("threshold"),
             match_meta.get("query_len"),
         )
-        return _make_dataset_answer_response(dataset_answer, req.model)
+        return _make_dataset_answer_response(
+            dataset_answer,
+            _local_fallback_model_name(req.model) if qwen_proxy_error_detail else req.model,
+        )
+
+    if qwen_proxy_error_detail:
+        raise HTTPException(status_code=503, detail=f"qwen upstream unavailable: {qwen_proxy_error_detail}")
 
     prompt_messages = req.messages[:-1] + [ChatMessage(role="user", content=sanitized_user_query)]
 
